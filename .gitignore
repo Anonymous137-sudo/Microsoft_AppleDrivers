@@ -1,0 +1,20 @@
+# macOS and editor metadata
+.DS_Store
+._*
+*.swp
+*.swo
+
+# Local build products
+build/
+build-*/
+out/
+artifacts/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Local diagnostics and captures
+*.log
+*.trace
+*.gputrace
