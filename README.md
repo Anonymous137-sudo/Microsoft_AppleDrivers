@@ -118,10 +118,8 @@ names belong to their respective owners.
 
 ## Licensing
 
-The project license has not yet been selected. Direct reuse of the audited DXMT
-and vkd3d-proton code strongly favors LGPL-2.1-or-later; that decision must be
-recorded before source is imported. Until a license is added, no
-permission to copy, modify, or redistribute project-authored material is
-granted beyond rights provided by applicable law. Third-party dependencies
-will retain their own licenses and will be tracked separately before they are
-introduced.
+Project-authored material is licensed under the
+[GNU General Public License version 3](LICENSE), identified as
+`GPL-3.0-only`. Third-party dependencies and adapted source retain their own
+licenses, copyright notices, and redistribution requirements; those terms are
+tracked separately and are not replaced by the repository-level license.

@@ -3,8 +3,9 @@
 Pinned source: `d01924b6f02fa3f78e3d371269267355363dbcb7`.
 
 This inventory classifies implementation candidates. It does not grant a
-license or copy source. Direct source reuse begins only after the repository
-adopts a compatible license and preserves upstream notices.
+license or copy source. The repository now uses `GPL-3.0-only`; direct source
+reuse additionally preserves upstream LGPL terms, copyright notices, and
+corresponding-source obligations.
 
 ## Direct-Reuse Candidates
 

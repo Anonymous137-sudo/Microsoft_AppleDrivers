@@ -233,13 +233,15 @@ tests; decompiled implementation text is not copied into project source.
 - [x] Audit the complete genesis architecture.
 - [x] Inventory current reusable upstream implementations.
 - [x] Select the reuse-first runtime, compiler, and backend boundaries.
-- [ ] Select a project license compatible with direct DXMT/vkd3d-proton reuse.
+- [x] License project-authored material under `GPL-3.0-only`, compatible with
+  direct reuse of LGPL components when their notices and obligations remain
+  intact.
 - [x] Record dependency pins, source provenance, patches, and update policy.
 
 Exit condition: the project can legally and reproducibly consume its selected
-baseline. LGPL-2.1-or-later is the recommended project license because DXMT and
-vkd3d-proton use it; a permissive-only policy would forbid much of the direct
-reuse described here.
+baseline. `GPL-3.0-only` is the selected project license. DXMT and
+vkd3d-proton retain their LGPL terms; their notices, corresponding-source
+requirements, and other applicable obligations remain intact.
 
 ### Phase 1 - Build the existing native baseline
 
@@ -321,7 +323,8 @@ is complete.
 
 Do not add empty ADX12 object scaffolding. The first implementation pass is:
 
-1. decide and add the compatible repository license;
+1. preserve the selected `GPL-3.0-only` repository license and all applicable
+   third-party notices;
 2. add a machine-readable dependency lock with the audited source revisions;
 3. build the unmodified DXMT D3D12/WineMetal baseline;
 4. retain its smoke result as the regression floor;

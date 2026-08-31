@@ -119,5 +119,6 @@ Invoke the established cache population automatically on runtime misses, then
 extend the proven bounded root-SRV/UAV/CBV/root-constant ABI to samplers,
 descriptor tables, dynamic root layouts, and graphics stages. Continue the vkd3d-proton
 resource sequence with texture alias handoff, split/enhanced barriers,
-general views, broader formats, and reserved resources. Direct
-DXMT/vkd3d-proton reuse still requires a recorded repository-license decision.
+general views, broader formats, and reserved resources. Project-authored work
+is licensed under `GPL-3.0-only`; direct DXMT/vkd3d-proton reuse must preserve
+the applicable upstream LGPL terms, notices, and source obligations.

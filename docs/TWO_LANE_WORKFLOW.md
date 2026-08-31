@@ -19,7 +19,8 @@ allows it and reports this checklist with `[x]`, `[~]`, and `[ ]` states.
 - [x] Complete the initial directly reusable, backend-separable, and
   Vulkan-inseparable source classification.
 - [x] Extract the first root-signature semantic unit and its tests.
-- [ ] Select and record a repository license compatible with reused LGPL code.
+- [x] License project-authored material under `GPL-3.0-only` while preserving
+  the licenses and notices of reused LGPL and other third-party components.
 - [~] Root-signature serialization/deserialization, versioned round-trip,
   mixed-table validation, and the 64-DWORD cost boundary are proven; the full
   vkd3d-proton root-signature matrix remains.
