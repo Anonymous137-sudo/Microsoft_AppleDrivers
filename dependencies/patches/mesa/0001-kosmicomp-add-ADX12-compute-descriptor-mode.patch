@@ -1,0 +1,173 @@
+From aaae7a25b8f02b90a436cb7428a5ef50c43c8508 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Mon, 24 Aug 2026 23:57:21 +0530
+Subject: [PATCH] kosmicomp: add ADX12 compute descriptor mode
+
+---
+ src/kosmickrisp/kosmicomp.c | 93 ++++++++++++++++++++++++++++++-------
+ 1 file changed, 77 insertions(+), 16 deletions(-)
+
+diff --git a/src/kosmickrisp/kosmicomp.c b/src/kosmickrisp/kosmicomp.c
+index 911b289f6db..61f9b59e006 100644
+--- a/src/kosmickrisp/kosmicomp.c
++++ b/src/kosmickrisp/kosmicomp.c
+@@ -8,6 +8,11 @@
+ 
+ #include "compiler/nir_to_msl.h"
+ #include "spirv/nir_spirv.h"
++#include "vulkan/kk_descriptor_set_layout.h"
++#include "vulkan/kk_descriptor_types.h"
++#include "vulkan/kk_shader.h"
++
++#include "vk_pipeline.h"
+ 
+ static int
+ load_spirv(const char *filename, uint32_t **words, size_t *nwords)
+@@ -66,8 +71,42 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
+ }
+ 
+ static void
+-optimize(nir_shader *nir)
++lower_adx12_compute_descriptors(nir_shader *nir)
++{
++   size_t layout_size = sizeof(struct kk_descriptor_set_layout) +
++                        sizeof(struct kk_descriptor_set_binding_layout);
++   struct kk_descriptor_set_layout *layout = calloc(1, layout_size);
++   assert(layout != NULL);
++
++   layout->binding_count = 1;
++   layout->descriptor_count = 1;
++   layout->non_variable_descriptor_buffer_size =
++      sizeof(struct kk_buffer_address);
++   layout->max_buffer_size = sizeof(struct kk_buffer_address);
++   layout->binding[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++   layout->binding[0].array_size = 1;
++   layout->binding[0].offset = 0;
++   layout->binding[0].stride = sizeof(struct kk_buffer_address);
++
++   struct vk_descriptor_set_layout *set_layouts[] = {&layout->vk};
++   struct vk_pipeline_robustness_state robustness = {
++      .uniform_buffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED,
++      .storage_buffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED,
++      .images = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED,
++   };
++
++   NIR_PASS(_, nir, kk_nir_lower_descriptors, &robustness,
++            ARRAY_SIZE(set_layouts), set_layouts);
++   free(layout);
++}
++
++static void
++optimize(nir_shader *nir, bool adx12_compute)
+ {
++   const nir_address_format adx12_buffer_format =
++      nir_address_format_64bit_global_32bit_offset;
++
++   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+    msl_preprocess_nir(nir);
+    msl_preprocess_nir_workarounds(nir, 0);
+ 
+@@ -79,9 +118,15 @@ optimize(nir_shader *nir)
+ 
+    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
+             nir_address_format_32bit_offset);
+-   NIR_PASS(_, nir, nir_lower_explicit_io,
+-            nir_var_mem_global | nir_var_mem_ubo | nir_var_mem_ssbo,
++   NIR_PASS(_, nir, nir_lower_memory_model);
++   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
+             nir_address_format_64bit_global);
++   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
++            adx12_compute ? adx12_buffer_format
++                          : nir_address_format_64bit_global);
++   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
++            adx12_compute ? adx12_buffer_format
++                          : nir_address_format_64bit_global);
+    if (nir->info.stage == MESA_SHADER_COMPUTE) {
+       if (!nir->info.shared_memory_explicit_layout) {
+          /* There may be garbage in shared_size, but it's the job of
+@@ -112,7 +157,11 @@ optimize(nir_shader *nir)
+    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
+ 
++   if (adx12_compute)
++      lower_adx12_compute_descriptors(nir);
++
+    msl_optimize_nir(nir);
++   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+ }
+ 
+ static mesa_shader_stage
+@@ -137,15 +186,20 @@ stage_from_filename(const char *filename)
+ int
+ main(int argc, char **argv)
+ {
+-   if (argc != 2) {
+-      fprintf(stderr, "Usage: kosmicomp filename.spv\n");
++   bool adx12_compute = argc == 3 &&
++                        strcmp(argv[1], "--adx12-compute-ssbo") == 0;
++   if (argc != 2 && !adx12_compute) {
++      fprintf(stderr,
++              "Usage: kosmicomp [--adx12-compute-ssbo] filename.spv\n");
+       return 1;
+    }
+ 
++   const char *filename = argv[adx12_compute ? 2 : 1];
++
+    // read file
+    size_t nwords = 0;
+    uint32_t *words = NULL;
+-   int result = load_spirv(argv[1], &words, &nwords);
++   int result = load_spirv(filename, &words, &nwords);
+    if (result == -1) {
+       return 2;
+    }
+@@ -158,29 +212,36 @@ main(int argc, char **argv)
+             .func = &debug_callback,
+             .private_data = NULL,
+          },
+-      .ubo_addr_format = nir_address_format_64bit_global,
+-      .ssbo_addr_format = nir_address_format_64bit_global,
++      .ubo_addr_format = adx12_compute
++                            ? nir_address_format_64bit_global_32bit_offset
++                            : nir_address_format_64bit_global,
++      .ssbo_addr_format = adx12_compute
++                             ? nir_address_format_64bit_global_32bit_offset
++                             : nir_address_format_64bit_global,
+       .phys_ssbo_addr_format = nir_address_format_64bit_global,
++      .shared_addr_format = nir_address_format_32bit_offset,
+    };
+    glsl_type_singleton_init_or_ref();
+-   struct nir_shader_compiler_options nir_options = {
++   struct nir_shader_compiler_options generic_nir_options = {
+       .lower_fdph = 1,
+    };
+-   mesa_shader_stage stage = stage_from_filename(argv[1]);
++   mesa_shader_stage stage = stage_from_filename(filename);
+    if (stage == MESA_SHADER_NONE) {
+-      fprintf(stderr, "Couldn't guess shader stage from %s\n", argv[1]);
++      fprintf(stderr, "Couldn't guess shader stage from %s\n", filename);
+       return 4;
+    }
+    nir_shader *shader =
+-      spirv_to_nir(words, nwords, NULL, stage, "main", &options, &nir_options);
++      spirv_to_nir(words, nwords, NULL, stage, "main", &options,
++                   adx12_compute ? &kk_nir_options : &generic_nir_options);
+    if (!shader) {
+       fprintf(stderr, "Compilation failed!\n");
+       return 3;
+    }
+-   // print nir
+-   nir_print_shader(shader, stdout);
+-   optimize(shader);
+-   nir_print_shader(shader, stdout);
++   if (!adx12_compute)
++      nir_print_shader(shader, stdout);
++   optimize(shader, adx12_compute);
++   if (!adx12_compute)
++      nir_print_shader(shader, stdout);
+ 
+    struct nir_to_msl_options translate_options = {
+       .mem_ctx = shader,
+-- 
+2.50.1
+

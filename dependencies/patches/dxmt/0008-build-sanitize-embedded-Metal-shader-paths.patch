@@ -1,0 +1,31 @@
+From d59162c38f44270600fdf9df5ea1fc3602b7d290 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 13:42:56 +0530
+Subject: [PATCH] build: sanitize embedded Metal shader paths
+
+---
+ meson.build | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/meson.build b/meson.build
+index 885b73b..433cf2a 100644
+--- a/meson.build
++++ b/meson.build
+@@ -119,7 +119,13 @@ xcrun = find_program('xcrun')
+ 
+ metalir_generator = generator(xcrun,
+   output    : [ '@BASENAME@.air'],
+-  arguments : [ '-sdk', 'macosx', 'metal', '-o', '@OUTPUT@', '-c', '@INPUT@', '@EXTRA_ARGS@'],
++  arguments : [
++    '-sdk', 'macosx', 'metal',
++    '-ffile-prefix-map=' + meson.project_source_root() + '/=/usr/src/adx12/dxmt/',
++    '-fdebug-prefix-map=' + meson.project_source_root() + '/=/usr/src/adx12/dxmt/',
++    '-fmacro-prefix-map=' + meson.project_source_root() + '/=/usr/src/adx12/dxmt/',
++    '-o', '@OUTPUT@', '-c', '@INPUT@', '@EXTRA_ARGS@'
++  ],
+ )
+ 
+ metallib_generator = generator(xcrun,
+-- 
+2.50.1
+

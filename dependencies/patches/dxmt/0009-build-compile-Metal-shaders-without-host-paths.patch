@@ -1,0 +1,58 @@
+From 3b8c06a3c69ad0ea73e76a576392fcf7b8bcfe15 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 13:46:16 +0530
+Subject: [PATCH] build: compile Metal shaders without host paths
+
+---
+ meson.build            |  9 +++------
+ tools/compile-metal.sh | 15 +++++++++++++++
+ 2 files changed, 18 insertions(+), 6 deletions(-)
+ create mode 100755 tools/compile-metal.sh
+
+diff --git a/meson.build b/meson.build
+index 433cf2a..32778a3 100644
+--- a/meson.build
++++ b/meson.build
+@@ -116,15 +116,12 @@ else
+ endif
+ 
+ xcrun = find_program('xcrun')
++metal_compile = find_program('tools/compile-metal.sh')
+ 
+-metalir_generator = generator(xcrun,
++metalir_generator = generator(metal_compile,
+   output    : [ '@BASENAME@.air'],
+   arguments : [
+-    '-sdk', 'macosx', 'metal',
+-    '-ffile-prefix-map=' + meson.project_source_root() + '/=/usr/src/adx12/dxmt/',
+-    '-fdebug-prefix-map=' + meson.project_source_root() + '/=/usr/src/adx12/dxmt/',
+-    '-fmacro-prefix-map=' + meson.project_source_root() + '/=/usr/src/adx12/dxmt/',
+-    '-o', '@OUTPUT@', '-c', '@INPUT@', '@EXTRA_ARGS@'
++    '@INPUT@', '@OUTPUT@', '@EXTRA_ARGS@'
+   ],
+ )
+ 
+diff --git a/tools/compile-metal.sh b/tools/compile-metal.sh
+new file mode 100755
+index 0000000..36c58f9
+--- /dev/null
++++ b/tools/compile-metal.sh
+@@ -0,0 +1,15 @@
++#!/bin/sh
++set -eu
++
++[ "$#" -ge 2 ] || {
++    printf 'usage: compile-metal.sh input.metal output.air [metal-options...]\n' >&2
++    exit 64
++}
++
++input=$1
++output=$2
++shift 2
++
++# Metal records an absolute source name in AIR when given a filesystem input.
++# Stdin preserves identical source bytes without embedding the build host path.
++xcrun -sdk macosx metal -x metal -c - -o "$output" "$@" < "$input"
+-- 
+2.50.1
+

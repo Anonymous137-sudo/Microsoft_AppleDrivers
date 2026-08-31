@@ -1,0 +1,62 @@
+From 60cd662f67a8aa02ef518e71b8b116287f8da1b9 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 21:43:03 +0530
+Subject: [PATCH] d3d12: admit reflected root SRV compute buffers
+
+---
+ src/d3d12/d3d12_pipeline_compute.cpp | 21 ++++++++++++++-------
+ 1 file changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 965c8b7..60d2194 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -50,6 +50,7 @@ struct KkComputeBundle {
+   uint32_t root_set0_offset;
+   uint32_t root_size;
+   uint32_t descriptor_count;
++  D3D12_ROOT_PARAMETER_TYPE descriptor_types[16];
+ };
+ 
+ std::string
+@@ -208,11 +209,17 @@ load_kk_compute_bundle(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, KkComputeB
+   }
+ 
+   for (uint32_t i = 0; i < bundle.descriptor_count; ++i) {
+-    auto expected = "set0,binding" + std::to_string(i) +
+-                    ",storage-buffer,write-only,root-uav,parameter" +
+-                    std::to_string(i);
+     auto key = "descriptor_" + std::to_string(i);
+-    if (value(key.c_str()) != expected) {
++    auto suffix = ",parameter" + std::to_string(i);
++    auto read_only = "set0,binding" + std::to_string(i) +
++                     ",storage-buffer,read-only,root-srv" + suffix;
++    auto write_only = "set0,binding" + std::to_string(i) +
++                      ",storage-buffer,write-only,root-uav" + suffix;
++    if (value(key.c_str()) == read_only) {
++      bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_SRV;
++    } else if (value(key.c_str()) == write_only) {
++      bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_UAV;
++    } else {
+       ERR("ADX12 compiler manifest descriptor reflection is incompatible");
+       return KkBundleStatus::Invalid;
+     }
+@@ -265,12 +272,12 @@ public:
+       auto root_signature = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+       if (root_signature == nullptr || root_signature->ParameterSlots != kk_bundle.descriptor_count ||
+           root_signature->UploadQwords != kk_bundle.descriptor_count) {
+-        ERR("ADX12 KK compute root signature does not match reflected UAV count");
++        ERR("ADX12 KK compute root signature does not match reflected descriptor count");
+         return E_INVALIDARG;
+       }
+       for (uint32_t i = 0; i < kk_bundle.descriptor_count; ++i) {
+-        if (root_signature->ParameterTypes[i] != D3D12_ROOT_PARAMETER_TYPE_UAV) {
+-          ERR("ADX12 KK compute requires reflected root UAV parameters");
++        if (root_signature->ParameterTypes[i] != kk_bundle.descriptor_types[i]) {
++          ERR("ADX12 KK compute root descriptor type does not match reflection");
+           return E_INVALIDARG;
+         }
+       }
+-- 
+2.50.1
+

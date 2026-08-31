@@ -1,0 +1,36 @@
+From 91818a9d2adadbc9b7e067b210eb0b22fa154038 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 03:45:00 +0530
+Subject: [PATCH] dxgi: return unsupported for content-protection events
+
+Avoid undefined return values in release builds for the currently unsupported hardware content-protection teardown event API.
+---
+ src/dxgi/dxgi_adapter.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/dxgi/dxgi_adapter.cpp b/src/dxgi/dxgi_adapter.cpp
+index abccc658dcf5a27ee018ff82cec0217ec349bac5..71f8983f37c6cc06dbc61d27359ddfd0861f8aaa 100644
+--- a/src/dxgi/dxgi_adapter.cpp
++++ b/src/dxgi/dxgi_adapter.cpp
+@@ -225,7 +225,11 @@ public:
+   HRESULT STDMETHODCALLTYPE
+   RegisterHardwareContentProtectionTeardownStatusEvent(HANDLE event,
+                                                        DWORD *cookie) override {
+-    assert(0 && "TODO");
++    (void)event;
++    if (cookie == nullptr)
++      return E_INVALIDARG;
++    *cookie = 0;
++    return DXGI_ERROR_UNSUPPORTED;
+   }
+ 
+   void STDMETHODCALLTYPE
+@@ -294,4 +298,4 @@ Com<IMTLDXGIAdapter> CreateAdapter(WMT::Device Device,
+       new MTLDXGIAdapter(Device, pFactory, config));
+ }
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+-- 
+2.51.0

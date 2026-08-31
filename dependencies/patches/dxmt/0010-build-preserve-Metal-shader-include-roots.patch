@@ -1,0 +1,26 @@
+From c478a342bfa3e82904d880034c91fe80ecfc725f Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 13:47:23 +0530
+Subject: [PATCH] build: preserve Metal shader include roots
+
+---
+ tools/compile-metal.sh | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/tools/compile-metal.sh b/tools/compile-metal.sh
+index 36c58f9..5559d22 100755
+--- a/tools/compile-metal.sh
++++ b/tools/compile-metal.sh
+@@ -9,7 +9,8 @@ set -eu
+ input=$1
+ output=$2
+ shift 2
++input_dir=$(CDPATH= cd -- "$(dirname -- "$input")" && pwd)
+ 
+ # Metal records an absolute source name in AIR when given a filesystem input.
+ # Stdin preserves identical source bytes without embedding the build host path.
+-xcrun -sdk macosx metal -x metal -c - -o "$output" "$@" < "$input"
++xcrun -sdk macosx metal -x metal -I "$input_dir" -c - -o "$output" "$@" < "$input"
+-- 
+2.50.1
+

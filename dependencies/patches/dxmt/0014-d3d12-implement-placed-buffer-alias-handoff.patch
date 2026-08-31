@@ -1,0 +1,167 @@
+From 209e68abc9febab7d9be54ca5705fc656da4b7b6 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Wed, 26 Aug 2026 15:46:03 +0530
+Subject: [PATCH] d3d12: implement placed buffer alias handoff
+
+---
+ src/d3d12/d3d12_buffer.cpp       | 18 ++++++++++++++++--
+ src/d3d12/d3d12_command_list.cpp | 16 ++++++++++++++--
+ src/dxmt/dxmt_buffer.cpp         | 28 ++++++++++++++++++++++++----
+ src/dxmt/dxmt_buffer.hpp         |  8 +++++++-
+ 4 files changed, 61 insertions(+), 9 deletions(-)
+
+diff --git a/src/d3d12/d3d12_buffer.cpp b/src/d3d12/d3d12_buffer.cpp
+index 11ea27d..add0d80 100644
+--- a/src/d3d12/d3d12_buffer.cpp
++++ b/src/d3d12/d3d12_buffer.cpp
+@@ -27,6 +27,7 @@ class MTLD3D12Buffer : public MTLD3D12Pageable<MTLD3D12Resource> {
+   D3D12_RESOURCE_DESC desc_;
+   D3D12_HEAP_PROPERTIES heap_props_;
+   D3D12_HEAP_FLAGS heap_flags_;
++  Com<MTLD3D12Heap> parent_heap_;
+ 
+ public:
+   MTLD3D12Buffer(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Resource>(pDevice) {}
+@@ -47,7 +48,20 @@ public:
+     buffer = new Buffer(desc_.Width, device_->GetMTLDevice());
+ 
+     Flags<BufferAllocationFlag> flags;
+-    buffer->rename(buffer->allocate(flags));
++    if (heap_props_.Type == D3D12_HEAP_TYPE_DEFAULT)
++      flags.set(BufferAllocationFlag::CpuInvisible);
++    else if (heap_props_.Type == D3D12_HEAP_TYPE_UPLOAD)
++      flags.set(BufferAllocationFlag::CpuWriteCombined);
++    Rc<BufferAllocation> allocation;
++    if (pHeap) {
++      parent_heap_ = pHeap;
++      allocation = buffer->allocate(pHeap->GetMTLHeap(), Offset, flags);
++    } else {
++      allocation = buffer->allocate(flags);
++    }
++    if (!allocation)
++      return E_OUTOFMEMORY;
++    buffer->rename(std::move(allocation));
+     device_->RegisterResidencyAndVA(buffer->current());
+ 
+     return S_OK;
+@@ -272,4 +286,4 @@ CreatePlacedBuffer(
+   return buffer->QueryInterface(riid, ppResource);
+ }
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/d3d12/d3d12_command_list.cpp b/src/d3d12/d3d12_command_list.cpp
+index 0718bcf..1b610c6 100644
+--- a/src/d3d12/d3d12_command_list.cpp
++++ b/src/d3d12/d3d12_command_list.cpp
+@@ -1054,8 +1054,20 @@ public:
+   };
+ 
+   void STDMETHODCALLTYPE ResourceBarrier(UINT Count, const D3D12_RESOURCE_BARRIER *barriers) {
+-    // TODO: in the initial implementation, we force synchronize everything and ignore barriers (which can be used as
+-    // optimization hints later)
++    if (Count == 0)
++      return;
++    if (!barriers) {
++      ERR("ResourceBarrier: barriers is null for Count=", Count);
++      return;
++    }
++
++    for (UINT i = 0; i < Count; ++i) {
++      if (barriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
++        // Metal heap aliases become visible in submission order. Ending the
++        // current encoder preserves D3D12's explicit alias handoff boundary.
++        allocator_->InvalidateCurrentPass();
++      }
++    }
+   };
+ 
+   void STDMETHODCALLTYPE ExecuteBundle(ID3D12GraphicsCommandList *CommandList) { IMPLEMENT_ME };
+diff --git a/src/dxmt/dxmt_buffer.cpp b/src/dxmt/dxmt_buffer.cpp
+index e918e63..718466c 100644
+--- a/src/dxmt/dxmt_buffer.cpp
++++ b/src/dxmt/dxmt_buffer.cpp
+@@ -29,7 +29,9 @@ namespace dxmt {
+ 
+ std::atomic_uint64_t global_buffer_seq = {0};
+ 
+-BufferAllocation::BufferAllocation(WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags) :
++BufferAllocation::BufferAllocation(
++    WMT::Device device, WMT::Heap heap, uint64_t heap_offset,
++    const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags) :
+     info_(info),
+     flags_(flags) {
+   // (sub)allocate a minimum of 256B buffer so that texture can be created
+@@ -45,7 +47,7 @@ BufferAllocation::BufferAllocation(WMT::Device device, const WMTBufferInfo &info
+     placed_buffer = wsi::aligned_malloc(info_.length, DXMT_PAGE_SIZE);
+     info_.memory.set(placed_buffer);
+   }
+-  obj_ = device.newBuffer(info_);
++  obj_ = heap ? heap.newBuffer(info_, heap_offset) : device.newBuffer(info_);
+   gpuAddress_ = info_.gpu_address;
+   mappedMemory_ = info_.memory.get_accessible_or_null();
+ };
+@@ -164,7 +166,25 @@ Buffer::allocate(Flags<BufferAllocationFlag> flags) {
+   info.memory.set(0);
+   info.length = length_;
+   info.options = options;
+-  return new BufferAllocation(device_, info, flags);
++  return new BufferAllocation(device_, {}, 0, info, flags);
++};
++
++Rc<BufferAllocation>
++Buffer::allocate(
++    WMT::Heap heap, uint64_t heap_offset,
++    Flags<BufferAllocationFlag> flags) {
++  WMTResourceOptions options = WMTResourceHazardTrackingModeUntracked;
++  if (flags.test(BufferAllocationFlag::CpuWriteCombined))
++    options |= WMTResourceOptionCPUCacheModeWriteCombined;
++  if (flags.test(BufferAllocationFlag::CpuInvisible))
++    options |= WMTResourceStorageModePrivate;
++  if (flags.test(BufferAllocationFlag::GpuManaged))
++    options |= WMTResourceStorageModeManaged;
++  WMTBufferInfo info;
++  info.memory.set(0);
++  info.length = length_;
++  info.options = options;
++  return new BufferAllocation(device_, heap, heap_offset, info, flags);
+ };
+ 
+ Rc<BufferAllocation>
+@@ -185,4 +205,4 @@ Buffer::decRef() {
+     delete this;
+ };
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/dxmt/dxmt_buffer.hpp b/src/dxmt/dxmt_buffer.hpp
+index 8bb4024..c0663ce 100644
+--- a/src/dxmt/dxmt_buffer.hpp
++++ b/src/dxmt/dxmt_buffer.hpp
+@@ -151,7 +151,9 @@ public:
+   small_vector<GenericAccessTracker, 1> fenceTrackers;
+ 
+ private:
+-  BufferAllocation(WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags);
++  BufferAllocation(
++      WMT::Device device, WMT::Heap heap, uint64_t heap_offset,
++      const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags);
+   void free();
+ 
+   BufferAllocation(const BufferAllocation &) = delete;
+@@ -185,6 +187,10 @@ public:
+ 
+   Rc<BufferAllocation> allocate(Flags<BufferAllocationFlag> flags);
+ 
++  Rc<BufferAllocation> allocate(
++      WMT::Heap heap, uint64_t heap_offset,
++      Flags<BufferAllocationFlag> flags);
++
+   Rc<BufferAllocation> rename(Rc<BufferAllocation> &&newAllocation);
+ 
+   Buffer(uint64_t length, WMT::Device device) : length_(length), device_(device) {}
+-- 
+2.50.1
+

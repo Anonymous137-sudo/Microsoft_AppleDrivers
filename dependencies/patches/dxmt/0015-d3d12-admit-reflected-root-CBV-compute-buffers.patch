@@ -1,0 +1,39 @@
+From aca52fa0da54ff0fb4d48d38bd529c931767a802 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Wed, 26 Aug 2026 15:46:03 +0530
+Subject: [PATCH] d3d12: admit reflected root CBV compute buffers
+
+---
+ src/d3d12/d3d12_pipeline_compute.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 07a1929..b6a0aa3 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -214,16 +214,22 @@ load_kk_compute_bundle(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, KkComputeB
+     auto &descriptor = value(key.c_str());
+     const std::string binding_prefix = "set0,binding";
+     auto binding_end = descriptor.find(",storage-buffer,");
++    auto uniform_binding_end = descriptor.find(",uniform-buffer,");
++    if (binding_end == std::string::npos)
++      binding_end = uniform_binding_end;
+     uint32_t binding = 0;
+     bool valid_binding = binding_end != std::string::npos &&
+                          descriptor.compare(0, binding_prefix.size(), binding_prefix) == 0 &&
+                          parse_u32(descriptor.substr(binding_prefix.size(), binding_end - binding_prefix.size()).c_str(), binding);
+     auto read_only = ",storage-buffer,read-only,root-srv" + suffix;
+     auto write_only = ",storage-buffer,write-only,root-uav" + suffix;
++    auto uniform = ",uniform-buffer,read-only,root-cbv" + suffix;
+     if (valid_binding && descriptor.substr(binding_end) == read_only) {
+       bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_SRV;
+     } else if (valid_binding && descriptor.substr(binding_end) == write_only) {
+       bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_UAV;
++    } else if (valid_binding && descriptor.substr(binding_end) == uniform) {
++      bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_CBV;
+     } else {
+       ERR("ADX12 compiler manifest descriptor reflection is incompatible");
+       return KkBundleStatus::Invalid;
+-- 
+2.50.1
+

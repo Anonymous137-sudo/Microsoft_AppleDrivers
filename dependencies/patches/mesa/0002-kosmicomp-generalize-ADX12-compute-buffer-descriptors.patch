@@ -1,0 +1,110 @@
+From d270b949a10623af94acd2b50b4a823525e39ad4 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 12:51:10 +0530
+Subject: [PATCH] kosmicomp: generalize ADX12 compute buffer descriptors
+
+---
+ src/kosmickrisp/kosmicomp.c | 47 ++++++++++++++++++++++++-------------
+ 1 file changed, 31 insertions(+), 16 deletions(-)
+
+diff --git a/src/kosmickrisp/kosmicomp.c b/src/kosmickrisp/kosmicomp.c
+index 61f9b59e006..cfa5d6ec9b0 100644
+--- a/src/kosmickrisp/kosmicomp.c
++++ b/src/kosmickrisp/kosmicomp.c
+@@ -71,22 +71,25 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
+ }
+ 
+ static void
+-lower_adx12_compute_descriptors(nir_shader *nir)
++lower_adx12_compute_descriptors(nir_shader *nir, unsigned descriptor_count)
+ {
+    size_t layout_size = sizeof(struct kk_descriptor_set_layout) +
+-                        sizeof(struct kk_descriptor_set_binding_layout);
++                        descriptor_count *
++                           sizeof(struct kk_descriptor_set_binding_layout);
+    struct kk_descriptor_set_layout *layout = calloc(1, layout_size);
+    assert(layout != NULL);
+ 
+-   layout->binding_count = 1;
+-   layout->descriptor_count = 1;
++   layout->binding_count = descriptor_count;
++   layout->descriptor_count = descriptor_count;
+    layout->non_variable_descriptor_buffer_size =
+-      sizeof(struct kk_buffer_address);
+-   layout->max_buffer_size = sizeof(struct kk_buffer_address);
+-   layout->binding[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+-   layout->binding[0].array_size = 1;
+-   layout->binding[0].offset = 0;
+-   layout->binding[0].stride = sizeof(struct kk_buffer_address);
++      descriptor_count * sizeof(struct kk_buffer_address);
++   layout->max_buffer_size = layout->non_variable_descriptor_buffer_size;
++   for (unsigned i = 0; i < descriptor_count; ++i) {
++      layout->binding[i].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++      layout->binding[i].array_size = 1;
++      layout->binding[i].offset = i * sizeof(struct kk_buffer_address);
++      layout->binding[i].stride = sizeof(struct kk_buffer_address);
++   }
+ 
+    struct vk_descriptor_set_layout *set_layouts[] = {&layout->vk};
+    struct vk_pipeline_robustness_state robustness = {
+@@ -101,8 +104,9 @@ lower_adx12_compute_descriptors(nir_shader *nir)
+ }
+ 
+ static void
+-optimize(nir_shader *nir, bool adx12_compute)
++optimize(nir_shader *nir, unsigned adx12_descriptor_count)
+ {
++   bool adx12_compute = adx12_descriptor_count != 0;
+    const nir_address_format adx12_buffer_format =
+       nir_address_format_64bit_global_32bit_offset;
+ 
+@@ -158,7 +162,7 @@ optimize(nir_shader *nir, bool adx12_compute)
+    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
+ 
+    if (adx12_compute)
+-      lower_adx12_compute_descriptors(nir);
++      lower_adx12_compute_descriptors(nir, adx12_descriptor_count);
+ 
+    msl_optimize_nir(nir);
+    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+@@ -186,15 +190,26 @@ stage_from_filename(const char *filename)
+ int
+ main(int argc, char **argv)
+ {
++   unsigned adx12_descriptor_count = 0;
+    bool adx12_compute = argc == 3 &&
+                         strcmp(argv[1], "--adx12-compute-ssbo") == 0;
+-   if (argc != 2 && !adx12_compute) {
++   if (argc == 4 && strcmp(argv[1], "--adx12-compute-ssbo-count") == 0) {
++      char *end = NULL;
++      unsigned long count = strtoul(argv[2], &end, 10);
++      if (end != argv[2] && *end == '\0' && count >= 1 && count <= 16)
++         adx12_descriptor_count = count;
++   } else if (adx12_compute) {
++      adx12_descriptor_count = 1;
++   }
++   if (argc != 2 && adx12_descriptor_count == 0) {
+       fprintf(stderr,
+-              "Usage: kosmicomp [--adx12-compute-ssbo] filename.spv\n");
++              "Usage: kosmicomp [--adx12-compute-ssbo | "
++              "--adx12-compute-ssbo-count 1..16] filename.spv\n");
+       return 1;
+    }
+ 
+-   const char *filename = argv[adx12_compute ? 2 : 1];
++   adx12_compute = adx12_descriptor_count != 0;
++   const char *filename = argv[adx12_compute ? argc - 1 : 1];
+ 
+    // read file
+    size_t nwords = 0;
+@@ -239,7 +254,7 @@ main(int argc, char **argv)
+    }
+    if (!adx12_compute)
+       nir_print_shader(shader, stdout);
+-   optimize(shader, adx12_compute);
++   optimize(shader, adx12_descriptor_count);
+    if (!adx12_compute)
+       nir_print_shader(shader, stdout);
+ 
+-- 
+2.50.1

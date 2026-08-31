@@ -1,0 +1,435 @@
+From 4a43e83aeb7e7944f0d284c9ecbfb38b4c1c725f Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 03:30:00 +0530
+Subject: [PATCH] d3d12: admit content-addressed KosmicKrisp compute bundles
+
+Route an explicitly requested, hash-bound compute pipeline through Mesa/KosmicKrisp-generated MSL. Keep DXMT Airconv as the unchanged fallback when no ADX12 bundle is requested, retain the root UAV allocation through command submission, and expose a versioned probe ABI so the harness can reject the host renderer.
+---
+ src/d3d12/d3d12.cpp                  |   7 +-
+ src/d3d12/d3d12.def                  |   3 +-
+ src/d3d12/d3d12_command_list.cpp     |  44 ++++++++-
+ src/d3d12/d3d12_device.hpp           |   6 +-
+ src/d3d12/d3d12_pipeline_compute.cpp | 184 ++++++++++++++++++++++++++++++++++-
+ src/d3d12/d3d12_root_signature.cpp   |   5 +-
+ src/dxmt/dxmt_buffer.hpp             |   7 +-
+ 7 files changed, 244 insertions(+), 12 deletions(-)
+
+diff --git a/src/d3d12/d3d12.cpp b/src/d3d12/d3d12.cpp
+index 9a0f9ab6fda51e16048dd405eb175486903d4b4b..23b8da226d759575fd26d37948a12ff84749bd48 100644
+--- a/src/d3d12/d3d12.cpp
++++ b/src/d3d12/d3d12.cpp
+@@ -26,6 +26,11 @@ namespace dxmt {
+ 
+ Logger Logger::s_instance("d3d12.log");
+ 
++extern "C" UINT WINAPI
++ADX12GetCompilerABI() {
++  return 1;
++}
++
+ extern "C" HRESULT WINAPI
+ D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid, void **ppDevice) {
+ 
+@@ -79,4 +84,4 @@ DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
+   return TRUE;
+ }
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/d3d12/d3d12.def b/src/d3d12/d3d12.def
+index 8af441dae0f12ab92edf3a152a981e2ac1dee98c..be1b2ad99a2fc1df379c93985a09cf267e825bdd 100644
+--- a/src/d3d12/d3d12.def
++++ b/src/d3d12/d3d12.def
+@@ -1,8 +1,9 @@
+ LIBRARY d3d12.dll
+ EXPORTS
++    ADX12GetCompilerABI
+     D3D12CreateDevice @101
+     D3D12CreateRootSignatureDeserializer
+     D3D12CreateVersionedRootSignatureDeserializer
+     D3D12SerializeRootSignature
+     D3D12SerializeVersionedRootSignature
+-    D3D12GetInterface
+\ No newline at end of file
++    D3D12GetInterface
+diff --git a/src/d3d12/d3d12_command_list.cpp b/src/d3d12/d3d12_command_list.cpp
+index 99eb607cc05f6c699e9c53e53c27cce8679910d5..2b9f53aa017549facf06357c8659b3b0225a8740 100644
+--- a/src/d3d12/d3d12_command_list.cpp
++++ b/src/d3d12/d3d12_command_list.cpp
+@@ -20,6 +20,8 @@
+ #include "com/com_pointer.hpp"
+ #include "dxmt_format.hpp"
+ 
++#include <limits>
++
+ namespace dxmt {
+ 
+ enum class DirtyState {
+@@ -514,6 +516,40 @@ public:
+     return Offset;
+   }
+ 
++  uint64_t
++  EncodeKkRootArgument(MTLD3D12RootSignature *pRootSig, MTLD3D12ComputePipelineState *pPSO) {
++    struct KkBufferAddress {
++      uint64_t base_address;
++      uint32_t size;
++      uint32_t zero;
++    };
++    static_assert(sizeof(KkBufferAddress) == 16);
++
++    auto resource_va = rootarg_compute_staging_[pRootSig->SlotQwordOffsets[0]];
++    uint64_t resource_offset = 0;
++    auto allocation = device_->LookupBufferByVA(resource_va, &resource_offset);
++    if (allocation == nullptr || resource_offset >= allocation->length())
++      return std::numeric_limits<uint64_t>::max();
++
++    auto [descriptor_ptr, descriptor_offset] = allocator_->AllocateGPUHeap(sizeof(KkBufferAddress), 16);
++    auto descriptor = reinterpret_cast<KkBufferAddress *>(descriptor_ptr);
++    uint64_t remaining = allocation->length() - resource_offset;
++    descriptor->base_address = resource_va;
++    descriptor->size = remaining > std::numeric_limits<uint32_t>::max()
++                           ? std::numeric_limits<uint32_t>::max()
++                           : static_cast<uint32_t>(remaining);
++    descriptor->zero = 0;
++
++    auto [root_ptr, root_offset] = allocator_->AllocateGPUHeap(pPSO->KkRootSize, 64);
++    memset(root_ptr, 0, pPSO->KkRootSize);
++    auto root_qwords = reinterpret_cast<uint64_t *>(root_ptr);
++    auto root_gpu_address = allocator_->gpu_heap_buffer_address_ + root_offset;
++    auto descriptor_gpu_address = allocator_->gpu_heap_buffer_address_ + descriptor_offset;
++    root_qwords[0] = root_gpu_address;
++    root_qwords[pPSO->KkRootSet0Offset / sizeof(uint64_t)] = descriptor_gpu_address;
++    return root_offset;
++  }
++
+   uint64_t
+   EncodeStaticSamplers(MTLD3D12RootSignature *pRootSig) {
+     auto static_sampler_encode_size = sizeof(uint64_t) * pRootSig->NumStaticSamplers * 4;
+@@ -542,7 +578,11 @@ public:
+ 
+     if (dirty_state_.test(DirtyState::ComputeRootArguments) && !SkipResourceBinding) {
+       if (rootsig_compute_) {
+-        auto Offset = EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
++        auto Offset = pso_compute_ && pso_compute_->UsesKkDescriptorAbi
++                          ? EncodeKkRootArgument(rootsig_compute_.ptr(), pso_compute_.ptr())
++                          : EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
++        if (Offset == std::numeric_limits<uint64_t>::max())
++          return false;
+         auto &cmd_argbuf = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+         cmd_argbuf.type = WMTComputeCommandSetBuffer;
+         cmd_argbuf.buffer = allocator_->gpu_heap_buffer_;
+@@ -1539,4 +1579,4 @@ MTLD3D12CommandAllocatorImpl::CreateCommandList(
+   return cmd_list->QueryInterface(riid, ppCommandList);
+ }
+ 
+-}; // namespace dxmt
+\ No newline at end of file
++}; // namespace dxmt
+diff --git a/src/d3d12/d3d12_device.hpp b/src/d3d12/d3d12_device.hpp
+index 52b1a6da0ef3cb4bb4cf97769ae7f8b8bd125859..3d534f41eb4a4f4884d1d613f4752bd0a47851f8 100644
+--- a/src/d3d12/d3d12_device.hpp
++++ b/src/d3d12/d3d12_device.hpp
+@@ -102,6 +102,7 @@ public:
+   uint32_t UploadQwords;
+   uint32_t ParameterSlots;
+   uint32_t const *SlotQwordOffsets;
++  D3D12_ROOT_PARAMETER_TYPE const *ParameterTypes;
+ 
+   size_t NumStaticSamplers;
+   uint64_t const *EncodedStaticSamplers;
+@@ -152,6 +153,9 @@ class MTLD3D12ComputePipelineState : public MTLD3D12PipelineState {
+ public:
+   WMT::Reference<WMT::ComputePipelineState> pso;
+   WMTSize threadgroup_size;
++  UINT UsesKkDescriptorAbi = 0;
++  uint32_t KkRootSet0Offset = 0;
++  uint32_t KkRootSize = 0;
+ 
+   virtual void AddRefPrivate() = 0;
+   virtual void ReleasePrivate() = 0;
+@@ -343,4 +347,4 @@ UINT DecomposeSubresource(
+     UINT *pPlaneSlice = NULL
+ );
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 02462906283cfe093162bff3f8ac39863a8bcf62..0d176cc6bfdde8cfb28fdc285742991b3283958d 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -22,9 +22,143 @@
+ #include "d3d12_pageable.hpp"
+ #include "log/log.hpp"
+ #include "airconv_public.h"
++#include "sha256.hpp"
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <limits>
++#include <string>
++#include <vector>
+ 
+ namespace dxmt {
+ 
++namespace {
++
++enum class KkBundleStatus {
++  NotRequested,
++  Loaded,
++  Invalid,
++};
++
++struct KkComputeBundle {
++  std::string source;
++  std::string entrypoint;
++  WMTSize threadgroup_size;
++  uint32_t root_set0_offset;
++  uint32_t root_size;
++};
++
++std::string
++get_process_environment(const char *name) {
++  DWORD required = GetEnvironmentVariableA(name, nullptr, 0);
++  if (required == 0)
++    return {};
++
++  std::vector<char> buffer(required);
++  DWORD copied = GetEnvironmentVariableA(name, buffer.data(), required);
++  if (copied == 0 || copied >= required)
++    return {};
++  return std::string(buffer.data(), copied);
++}
++
++std::string
++sha256_string(const void *data, size_t size) {
++  static constexpr char hex[] = "0123456789abcdef";
++  auto hash = compute_sha256_hash(static_cast<const uint8_t *>(data), size);
++  std::string result(sizeof(hash.hash) * 2, '0');
++  for (size_t i = 0; i < sizeof(hash.hash); i++) {
++    result[i * 2] = hex[hash.hash[i] >> 4];
++    result[i * 2 + 1] = hex[hash.hash[i] & 0xf];
++  }
++  return result;
++}
++
++bool
++read_text_file(const char *path, std::string &contents) {
++  std::ifstream input(path, std::ios::binary | std::ios::ate);
++  if (!input)
++    return false;
++
++  auto end = input.tellg();
++  constexpr std::streamoff max_source_size = 16 * 1024 * 1024;
++  if (end <= 0 || end > max_source_size)
++    return false;
++  contents.resize(static_cast<size_t>(end));
++  input.seekg(0, std::ios::beg);
++  return static_cast<bool>(input.read(contents.data(), static_cast<std::streamsize>(end)));
++}
++
++bool
++parse_u32(const char *text, uint32_t &value) {
++  if (text == nullptr || *text == '\0')
++    return false;
++  char *end = nullptr;
++  unsigned long parsed = std::strtoul(text, &end, 10);
++  if (end == text || *end != '\0' || parsed > std::numeric_limits<uint32_t>::max())
++    return false;
++  value = static_cast<uint32_t>(parsed);
++  return true;
++}
++
++bool
++parse_threadgroup(const char *text, WMTSize &size) {
++  unsigned int x = 0, y = 0, z = 0;
++  int consumed = 0;
++  if (text == nullptr || std::sscanf(text, "%u,%u,%u%n", &x, &y, &z, &consumed) != 3 || text[consumed] != '\0')
++    return false;
++  if (x == 0 || y == 0 || z == 0)
++    return false;
++  size = {x, y, z};
++  return true;
++}
++
++KkBundleStatus
++load_kk_compute_bundle(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, KkComputeBundle &bundle) {
++  auto source_path = get_process_environment("ADX12_KK_COMPUTE_MSL");
++  if (source_path.empty())
++    return KkBundleStatus::NotRequested;
++  std::fprintf(stderr, "ADX12_KK_COMPUTE_BUNDLE=requested\n");
++
++  auto expected_dxil = get_process_environment("ADX12_KK_COMPUTE_DXIL_SHA256");
++  auto expected_msl = get_process_environment("ADX12_KK_COMPUTE_MSL_SHA256");
++  auto entrypoint = get_process_environment("ADX12_KK_COMPUTE_ENTRYPOINT");
++  auto threadgroup = get_process_environment("ADX12_KK_COMPUTE_WORKGROUP");
++  auto root_set0_offset = get_process_environment("ADX12_KK_ROOT_SET0_OFFSET");
++  auto root_size = get_process_environment("ADX12_KK_ROOT_SIZE");
++
++  if (expected_dxil.size() != 64 || expected_msl.size() != 64 || entrypoint.empty() ||
++      !parse_threadgroup(threadgroup.c_str(), bundle.threadgroup_size) ||
++      !parse_u32(root_set0_offset.c_str(), bundle.root_set0_offset) ||
++      !parse_u32(root_size.c_str(), bundle.root_size)) {
++    ERR("ADX12 KK compute bundle metadata is incomplete");
++    return KkBundleStatus::Invalid;
++  }
++
++  if ((bundle.root_set0_offset & 7) || (bundle.root_size & 7) ||
++      bundle.root_size < bundle.root_set0_offset + sizeof(uint64_t) ||
++      bundle.root_size > 64 * 1024) {
++    ERR("ADX12 KK root descriptor layout is invalid");
++    return KkBundleStatus::Invalid;
++  }
++
++  if (_stricmp(sha256_string(desc->CS.pShaderBytecode, desc->CS.BytecodeLength).c_str(), expected_dxil.c_str()) != 0) {
++    ERR("ADX12 KK compute bundle does not match the requested DXIL");
++    return KkBundleStatus::Invalid;
++  }
++  if (!read_text_file(source_path.c_str(), bundle.source) ||
++      _stricmp(sha256_string(bundle.source.data(), bundle.source.size()).c_str(), expected_msl.c_str()) != 0) {
++    ERR("ADX12 KK compute source is unavailable or failed hash validation");
++    return KkBundleStatus::Invalid;
++  }
++
++  bundle.entrypoint = entrypoint;
++  return KkBundleStatus::Loaded;
++}
++
++} // namespace
++
+ class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12ComputePipelineState> {
+ 
+   sm50_shader_t shader_cs;
+@@ -38,6 +172,50 @@ public:
+   HRESULT
+   Initialize(const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc) {
+ 
++    auto metal = device_->GetMTLDevice();
++    WMT::Reference<WMT::Error> err;
++    KkComputeBundle kk_bundle;
++    auto kk_status = load_kk_compute_bundle(pDesc, kk_bundle);
++    if (kk_status == KkBundleStatus::Invalid)
++      return E_INVALIDARG;
++    if (kk_status == KkBundleStatus::Loaded) {
++      auto root_signature = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
++      if (root_signature == nullptr || root_signature->ParameterSlots != 1 || root_signature->UploadQwords != 1 ||
++          root_signature->ParameterTypes[0] != D3D12_ROOT_PARAMETER_TYPE_UAV) {
++        ERR("ADX12 KK phase-2 compute requires one root UAV");
++        return E_INVALIDARG;
++      }
++
++      auto cs_lib = metal.newLibraryWithSource(kk_bundle.source, err);
++      if (!cs_lib) {
++        ERR("Failed to compile ADX12 KK compute source: ", err.description().getUTF8String());
++        return E_FAIL;
++      }
++      auto cs_func = cs_lib.newFunction(kk_bundle.entrypoint.c_str());
++      if (!cs_func) {
++        ERR("ADX12 KK compute entry point is unavailable");
++        return E_FAIL;
++      }
++
++      WMTComputePipelineInfo info;
++      WMT::InitializeComputePipelineInfo(info);
++      info.compute_function = cs_func;
++      info.support_indirect_command_buffers = true;
++      pso = metal.newComputePipelineState(info, err);
++      if (!pso) {
++        ERR("Failed to create ADX12 KK compute PSO: ", err.description().getUTF8String());
++        return E_FAIL;
++      }
++
++      threadgroup_size = kk_bundle.threadgroup_size;
++      UsesKkDescriptorAbi = 1;
++      KkRootSet0Offset = kk_bundle.root_set0_offset;
++      KkRootSize = kk_bundle.root_size;
++      Logger::info("ADX12_KK_COMPUTE_BUNDLE=admitted");
++      std::fprintf(stderr, "ADX12_KK_COMPUTE_BUNDLE=admitted\n");
++      return S_OK;
++    }
++
+     sm50_error_t sm50_err;
+ 
+     SM50_SHADER_ROOT_SIGNATURE_DATA rootsig;
+@@ -76,10 +254,6 @@ public:
+ 
+     auto cs_data = WMT::MakeDispatchData(cs_bitcode_compiled.Data, cs_bitcode_compiled.Size);
+ 
+-    auto metal = device_->GetMTLDevice();
+-
+-    WMT::Reference<WMT::Error> err;
+-
+     auto cs_lib = metal.newLibrary(cs_data, err);
+ 
+     auto cs_func = cs_lib.newFunction("cs_main");
+@@ -140,4 +314,4 @@ CreateComputePipelineState(
+   return pso->QueryInterface(riid, ppPipelineState);
+ };
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/d3d12/d3d12_root_signature.cpp b/src/d3d12/d3d12_root_signature.cpp
+index 7a24aac90bfd9ff76a5459f4dd6e04565c6d1406..222be0281358445831d5542b345841436374eaf7 100644
+--- a/src/d3d12/d3d12_root_signature.cpp
++++ b/src/d3d12/d3d12_root_signature.cpp
+@@ -370,6 +370,7 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
+ 
+   std::vector<uint8_t> blob_;
+   std::vector<uint32_t> qword_offsets_;
++  std::vector<D3D12_ROOT_PARAMETER_TYPE> parameter_types_;
+ 
+   std::vector<Rc<Sampler>> static_samplers_; // which is not really "static"
+   /**
+@@ -410,6 +411,7 @@ public:
+         if (!desc.pParameters)
+           return E_INVALIDARG;
+         auto &parameter = desc.pParameters[i];
++        parameter_types_.push_back(parameter.ParameterType);
+         if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+           bool is_normal_range = false, is_sampler_range = false;
+           for (unsigned j = 0; j < parameter.DescriptorTable.NumDescriptorRanges; j++) {
+@@ -457,6 +459,7 @@ public:
+     UploadQwords = total_qwords;
+     ParameterSlots = qword_offsets_.size();
+     SlotQwordOffsets = qword_offsets_.data();
++    ParameterTypes = parameter_types_.data();
+ 
+     return S_OK;
+   }
+@@ -503,4 +506,4 @@ CreateRootSignature(
+   return root_sig->QueryInterface(riid, ppRootSignature);
+ }
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/dxmt/dxmt_buffer.hpp b/src/dxmt/dxmt_buffer.hpp
+index 9feb708fa5e261eb66afd16eaf55b6febebb20d6..8bb40244c231530a71c915579d32f3595995b0a9 100644
+--- a/src/dxmt/dxmt_buffer.hpp
++++ b/src/dxmt/dxmt_buffer.hpp
+@@ -109,6 +109,11 @@ public:
+     return gpuAddress_;
+   }
+ 
++  uint64_t
++  length() const noexcept {
++    return info_.length;
++  }
++
+   void
+   useSuballocation(uint32_t suballocation) noexcept {
+     current_suballocation_ = suballocation;
+@@ -223,4 +228,4 @@ struct BufferSlice {
+   uint32_t elementCount = 0;
+ };
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+-- 
+2.51.0

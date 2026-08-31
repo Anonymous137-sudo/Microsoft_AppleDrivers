@@ -1,0 +1,210 @@
+From a6735b785867db926226cd805191f92b33b67909 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 12:32:13 +0530
+Subject: [PATCH] d3d12: add versioned compiler cache and root cost validation
+
+---
+ src/d3d12/d3d12.cpp                  |   2 +-
+ src/d3d12/d3d12_pipeline_compute.cpp | 102 +++++++++++++++++++++++----
+ src/d3d12/d3d12_root_signature.cpp   |  12 ++++
+ 3 files changed, 100 insertions(+), 16 deletions(-)
+
+diff --git a/src/d3d12/d3d12.cpp b/src/d3d12/d3d12.cpp
+index 23b8da2..ec9d7ee 100644
+--- a/src/d3d12/d3d12.cpp
++++ b/src/d3d12/d3d12.cpp
+@@ -28,7 +28,7 @@ Logger Logger::s_instance("d3d12.log");
+ 
+ extern "C" UINT WINAPI
+ ADX12GetCompilerABI() {
+-  return 1;
++  return 2;
+ }
+ 
+ extern "C" HRESULT WINAPI
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 0d176cc..25937da 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -30,6 +30,7 @@
+ #include <fstream>
+ #include <limits>
+ #include <string>
++#include <unordered_map>
+ #include <vector>
+ 
+ namespace dxmt {
+@@ -114,25 +115,95 @@ parse_threadgroup(const char *text, WMTSize &size) {
+   return true;
+ }
+ 
++bool
++parse_manifest(const std::string &contents, std::unordered_map<std::string, std::string> &values) {
++  size_t offset = 0;
++  while (offset < contents.size()) {
++    auto end = contents.find('\n', offset);
++    if (end == std::string::npos)
++      end = contents.size();
++    auto line = contents.substr(offset, end - offset);
++    if (!line.empty() && line.back() == '\r')
++      line.pop_back();
++    offset = end + 1;
++    if (line.empty() || line[0] == '#')
++      continue;
++
++    auto separator = line.find('=');
++    if (separator == std::string::npos || separator == 0 || separator + 1 >= line.size())
++      return false;
++    auto key = line.substr(0, separator);
++    auto value = line.substr(separator + 1);
++    if (key.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos ||
++        value.find_first_of("\r\n") != std::string::npos || !values.emplace(key, value).second)
++      return false;
++  }
++  return true;
++}
++
++bool
++is_hex_sha256(const std::string &value) {
++  return value.size() == 64 &&
++         value.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
++}
++
++bool
++is_relative_filename(const std::string &value) {
++  return !value.empty() && value != "." && value != ".." &&
++         value.find_first_of("/\\:") == std::string::npos;
++}
++
++std::string
++manifest_sibling(const std::string &manifest, const std::string &filename) {
++  auto separator = manifest.find_last_of("/\\");
++  if (separator == std::string::npos)
++    return filename;
++  return manifest.substr(0, separator + 1) + filename;
++}
++
+ KkBundleStatus
+ load_kk_compute_bundle(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, KkComputeBundle &bundle) {
+-  auto source_path = get_process_environment("ADX12_KK_COMPUTE_MSL");
+-  if (source_path.empty())
++  auto manifest_path = get_process_environment("ADX12_COMPILER_MANIFEST");
++  if (manifest_path.empty())
+     return KkBundleStatus::NotRequested;
+-  std::fprintf(stderr, "ADX12_KK_COMPUTE_BUNDLE=requested\n");
++  std::fprintf(stderr, "ADX12_COMPILER_CACHE=requested\n");
+ 
+-  auto expected_dxil = get_process_environment("ADX12_KK_COMPUTE_DXIL_SHA256");
+-  auto expected_msl = get_process_environment("ADX12_KK_COMPUTE_MSL_SHA256");
+-  auto entrypoint = get_process_environment("ADX12_KK_COMPUTE_ENTRYPOINT");
+-  auto threadgroup = get_process_environment("ADX12_KK_COMPUTE_WORKGROUP");
+-  auto root_set0_offset = get_process_environment("ADX12_KK_ROOT_SET0_OFFSET");
+-  auto root_size = get_process_environment("ADX12_KK_ROOT_SIZE");
++  std::string manifest_source;
++  std::unordered_map<std::string, std::string> values;
++  if (!read_text_file(manifest_path.c_str(), manifest_source) ||
++      !parse_manifest(manifest_source, values)) {
++    ERR("ADX12 compiler manifest is unavailable or malformed");
++    return KkBundleStatus::Invalid;
++  }
+ 
+-  if (expected_dxil.size() != 64 || expected_msl.size() != 64 || entrypoint.empty() ||
++  auto value = [&](const char *key) -> const std::string & {
++    static const std::string empty;
++    auto entry = values.find(key);
++    return entry == values.end() ? empty : entry->second;
++  };
++  auto &schema = value("schema");
++  auto &compiler_abi = value("compiler_abi");
++  auto &cache_key = value("cache_key");
++  auto &expected_dxil = value("dxil_sha256");
++  auto &expected_msl = value("msl_sha256");
++  auto &msl_file = value("msl_file");
++  auto &stage = value("stage");
++  auto &entrypoint = value("entry_point");
++  auto &threadgroup = value("threadgroup_size");
++  auto &root_set0_offset = value("kk_root_set0_offset");
++  auto &root_size = value("kk_root_size");
++  auto &descriptor_count = value("descriptor_count");
++  auto &descriptor0 = value("descriptor_0");
++
++  if (schema != "adx12-compiler-cache-v1" || compiler_abi != "2" ||
++      !is_hex_sha256(cache_key) || !is_hex_sha256(expected_dxil) ||
++      !is_hex_sha256(expected_msl) || !is_relative_filename(msl_file) ||
++      stage != "compute" || entrypoint.empty() || descriptor_count != "1" ||
++      descriptor0 != "set0,binding0,storage-buffer,write-only,root-uav,parameter0" ||
+       !parse_threadgroup(threadgroup.c_str(), bundle.threadgroup_size) ||
+       !parse_u32(root_set0_offset.c_str(), bundle.root_set0_offset) ||
+       !parse_u32(root_size.c_str(), bundle.root_size)) {
+-    ERR("ADX12 KK compute bundle metadata is incomplete");
++    ERR("ADX12 compiler manifest has an incompatible schema or reflection contract");
+     return KkBundleStatus::Invalid;
+   }
+ 
+@@ -144,12 +215,13 @@ load_kk_compute_bundle(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, KkComputeB
+   }
+ 
+   if (_stricmp(sha256_string(desc->CS.pShaderBytecode, desc->CS.BytecodeLength).c_str(), expected_dxil.c_str()) != 0) {
+-    ERR("ADX12 KK compute bundle does not match the requested DXIL");
++    ERR("ADX12 compiler cache entry does not match the requested DXIL");
+     return KkBundleStatus::Invalid;
+   }
++  auto source_path = manifest_sibling(manifest_path, msl_file);
+   if (!read_text_file(source_path.c_str(), bundle.source) ||
+       _stricmp(sha256_string(bundle.source.data(), bundle.source.size()).c_str(), expected_msl.c_str()) != 0) {
+-    ERR("ADX12 KK compute source is unavailable or failed hash validation");
++    ERR("ADX12 compiler cache MSL is unavailable or failed hash validation");
+     return KkBundleStatus::Invalid;
+   }
+ 
+@@ -211,8 +283,8 @@ public:
+       UsesKkDescriptorAbi = 1;
+       KkRootSet0Offset = kk_bundle.root_set0_offset;
+       KkRootSize = kk_bundle.root_size;
+-      Logger::info("ADX12_KK_COMPUTE_BUNDLE=admitted");
+-      std::fprintf(stderr, "ADX12_KK_COMPUTE_BUNDLE=admitted\n");
++      Logger::info("ADX12_COMPILER_CACHE=admitted");
++      std::fprintf(stderr, "ADX12_COMPILER_CACHE=admitted\n");
+       return S_OK;
+     }
+ 
+diff --git a/src/d3d12/d3d12_root_signature.cpp b/src/d3d12/d3d12_root_signature.cpp
+index 222be02..3218329 100644
+--- a/src/d3d12/d3d12_root_signature.cpp
++++ b/src/d3d12/d3d12_root_signature.cpp
+@@ -407,12 +407,14 @@ public:
+       if (desc.NumParameters > D3D12_MAX_ROOT_COST)
+         return E_INVALIDARG;
+ 
++      uint64_t root_cost = 0;
+       for (unsigned i = 0; i < desc.NumParameters; i++) {
+         if (!desc.pParameters)
+           return E_INVALIDARG;
+         auto &parameter = desc.pParameters[i];
+         parameter_types_.push_back(parameter.ParameterType);
+         if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
++          root_cost += 1;
+           bool is_normal_range = false, is_sampler_range = false;
+           for (unsigned j = 0; j < parameter.DescriptorTable.NumDescriptorRanges; j++) {
+             if (!parameter.DescriptorTable.pDescriptorRanges)
+@@ -433,7 +435,17 @@ public:
+           }
+           if (is_normal_range && is_sampler_range)
+             return E_INVALIDARG;
++        } else if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
++          root_cost += parameter.Constants.Num32BitValues;
++        } else if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV ||
++                   parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV ||
++                   parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV) {
++          root_cost += 2;
++        } else {
++          return E_INVALIDARG;
+         }
++        if (root_cost > D3D12_MAX_ROOT_COST)
++          return E_INVALIDARG;
+       }
+     }
+ 
+-- 
+2.50.1
+

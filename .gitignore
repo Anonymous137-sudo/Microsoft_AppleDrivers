@@ -9,6 +9,7 @@ build/
 build-*/
 out/
 artifacts/
+.adx12-deps/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -18,3 +19,6 @@ compile_commands.json
 *.log
 *.trace
 *.gputrace
+
+# Locally materialized third-party source
+third_party/materialized/

@@ -1,0 +1,257 @@
+From b0d97c56d4b9986ecb519e9827c0337144c6385f Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Wed, 26 Aug 2026 18:48:41 +0530
+Subject: [PATCH] d3d12: order legacy barriers and admit root constants
+
+---
+ src/d3d12/d3d12_command_list.cpp     | 60 +++++++++++++++++++++++-----
+ src/d3d12/d3d12_device.hpp           |  3 ++
+ src/d3d12/d3d12_pipeline_compute.cpp | 22 +++++++++-
+ src/d3d12/d3d12_root_signature.cpp   |  6 +++
+ 4 files changed, 79 insertions(+), 12 deletions(-)
+
+diff --git a/src/d3d12/d3d12_command_list.cpp b/src/d3d12/d3d12_command_list.cpp
+index 1b610c6..3b599ae 100644
+--- a/src/d3d12/d3d12_command_list.cpp
++++ b/src/d3d12/d3d12_command_list.cpp
+@@ -529,6 +529,18 @@ public:
+     auto [descriptor_ptr, descriptor_offset] = allocator_->AllocateGPUHeap(descriptor_size, 16);
+     auto descriptors = reinterpret_cast<KkBufferAddress *>(descriptor_ptr);
+     for (uint32_t i = 0; i < pPSO->KkDescriptorCount; ++i) {
++      if (pPSO->KkDescriptorTypes[i] == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
++        auto constants_size = pPSO->KkDescriptorDwordCounts[i] * sizeof(uint32_t);
++        auto [constants_ptr, constants_offset] = allocator_->AllocateGPUHeap(constants_size, 16);
++        memcpy(
++            constants_ptr,
++            reinterpret_cast<const uint32_t *>(rootarg_compute_staging_ + pRootSig->SlotQwordOffsets[i]),
++            constants_size);
++        descriptors[i].base_address = allocator_->gpu_heap_buffer_address_ + constants_offset;
++        descriptors[i].size = constants_size;
++        descriptors[i].zero = 0;
++        continue;
++      }
+       auto resource_va = rootarg_compute_staging_[pRootSig->SlotQwordOffsets[i]];
+       uint64_t resource_offset = 0;
+       auto allocation = device_->LookupBufferByVA(resource_va, &resource_offset);
+@@ -1061,13 +1073,29 @@ public:
+       return;
+     }
+ 
++    bool requires_ordering_boundary = false;
+     for (UINT i = 0; i < Count; ++i) {
+-      if (barriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+-        // Metal heap aliases become visible in submission order. Ending the
+-        // current encoder preserves D3D12's explicit alias handoff boundary.
+-        allocator_->InvalidateCurrentPass();
++      switch (barriers[i].Type) {
++      case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION:
++        if (!barriers[i].Transition.pResource) {
++          ERR("ResourceBarrier: transition barrier has no resource");
++          continue;
++        }
++        requires_ordering_boundary = true;
++        break;
++      case D3D12_RESOURCE_BARRIER_TYPE_ALIASING:
++      case D3D12_RESOURCE_BARRIER_TYPE_UAV:
++        requires_ordering_boundary = true;
++        break;
++      default:
++        ERR("ResourceBarrier: unsupported barrier type=", barriers[i].Type);
++        break;
+       }
+     }
++    // Metal resources become visible in submission order. Ending the current
++    // encoder establishes the explicit D3D12 ordering boundary.
++    if (requires_ordering_boundary)
++      allocator_->InvalidateCurrentPass();
+   };
+ 
+   void STDMETHODCALLTYPE ExecuteBundle(ID3D12GraphicsCommandList *CommandList) { IMPLEMENT_ME };
+@@ -1105,7 +1133,8 @@ public:
+   void STDMETHODCALLTYPE SetComputeRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
+     if (!rootsig_compute_)
+       return;
+-    if (Index > rootsig_compute_->ParameterSlots)
++    if (Index >= rootsig_compute_->ParameterSlots ||
++        rootsig_compute_->ParameterTypes[Index] != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
+       return;
+     rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = BaseDescriptor.ptr;
+     dirty_state_.set(DirtyState::ComputeRootArguments);
+@@ -1115,7 +1144,8 @@ public:
+   SetGraphicsRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
+     if (!rootsig_graphics_)
+       return;
+-    if (Index > rootsig_graphics_->ParameterSlots)
++    if (Index >= rootsig_graphics_->ParameterSlots ||
++        rootsig_graphics_->ParameterTypes[Index] != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
+       return;
+     rootarg_graphics_staging_[rootsig_graphics_->SlotQwordOffsets[Index]] = BaseDescriptor.ptr;
+     dirty_state_.set(DirtyState::GraphicsRootArguments);
+@@ -1124,7 +1154,9 @@ public:
+   void STDMETHODCALLTYPE SetComputeRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) {
+     if (!rootsig_compute_)
+       return;
+-    if (Index > rootsig_compute_->ParameterSlots)
++    if (Index >= rootsig_compute_->ParameterSlots ||
++        rootsig_compute_->ParameterTypes[Index] != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ||
++        DstOffset >= rootsig_compute_->ParameterDwordCounts[Index])
+       return;
+     auto dst = reinterpret_cast<uint32_t *>(rootarg_compute_staging_ + rootsig_compute_->SlotQwordOffsets[Index]);
+     dst[DstOffset] = Data;
+@@ -1135,7 +1167,9 @@ public:
+   SetGraphicsRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) {
+     if (!rootsig_graphics_)
+       return;
+-    if (Index > rootsig_graphics_->ParameterSlots)
++    if (Index >= rootsig_graphics_->ParameterSlots ||
++        rootsig_graphics_->ParameterTypes[Index] != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ||
++        DstOffset >= rootsig_graphics_->ParameterDwordCounts[Index])
+       return;
+     auto dst = reinterpret_cast<uint32_t *>(rootarg_graphics_staging_ + rootsig_graphics_->SlotQwordOffsets[Index]);
+     dst[DstOffset] = Data;
+@@ -1146,7 +1180,10 @@ public:
+   SetComputeRoot32BitConstants(UINT Index, UINT ConstantCount, const void *pData, UINT DstOffset) {
+     if (!rootsig_compute_)
+       return;
+-    if (Index > rootsig_compute_->ParameterSlots)
++    if (Index >= rootsig_compute_->ParameterSlots || !pData ||
++        rootsig_compute_->ParameterTypes[Index] != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ||
++        DstOffset > rootsig_compute_->ParameterDwordCounts[Index] ||
++        ConstantCount > rootsig_compute_->ParameterDwordCounts[Index] - DstOffset)
+       return;
+     auto src = reinterpret_cast<const uint32_t *>(pData);
+     auto dst = reinterpret_cast<uint32_t *>(rootarg_compute_staging_ + rootsig_compute_->SlotQwordOffsets[Index]);
+@@ -1160,7 +1197,10 @@ public:
+   SetGraphicsRoot32BitConstants(UINT Index, UINT ConstantCount, const void *pData, UINT DstOffset) {
+     if (!rootsig_graphics_)
+       return;
+-    if (Index > rootsig_graphics_->ParameterSlots)
++    if (Index >= rootsig_graphics_->ParameterSlots || !pData ||
++        rootsig_graphics_->ParameterTypes[Index] != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ||
++        DstOffset > rootsig_graphics_->ParameterDwordCounts[Index] ||
++        ConstantCount > rootsig_graphics_->ParameterDwordCounts[Index] - DstOffset)
+       return;
+     auto src = reinterpret_cast<const uint32_t *>(pData);
+     auto dst = reinterpret_cast<uint32_t *>(rootarg_graphics_staging_ + rootsig_graphics_->SlotQwordOffsets[Index]);
+diff --git a/src/d3d12/d3d12_device.hpp b/src/d3d12/d3d12_device.hpp
+index ddd7f49..42b8823 100644
+--- a/src/d3d12/d3d12_device.hpp
++++ b/src/d3d12/d3d12_device.hpp
+@@ -104,6 +104,7 @@ public:
+   uint32_t ParameterSlots;
+   uint32_t const *SlotQwordOffsets;
+   D3D12_ROOT_PARAMETER_TYPE const *ParameterTypes;
++  uint32_t const *ParameterDwordCounts;
+ 
+   size_t NumStaticSamplers;
+   uint64_t const *EncodedStaticSamplers;
+@@ -156,6 +157,8 @@ public:
+   WMTSize threadgroup_size;
+   UINT UsesKkDescriptorAbi = 0;
+   uint32_t KkDescriptorCount = 0;
++  D3D12_ROOT_PARAMETER_TYPE KkDescriptorTypes[16] = {};
++  uint32_t KkDescriptorDwordCounts[16] = {};
+   uint32_t KkRootSet0Offset = 0;
+   uint32_t KkRootSize = 0;
+ 
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index b6a0aa3..68f3f13 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -51,6 +51,7 @@ struct KkComputeBundle {
+   uint32_t root_size;
+   uint32_t descriptor_count;
+   D3D12_ROOT_PARAMETER_TYPE descriptor_types[16];
++  uint32_t descriptor_dword_counts[16] = {};
+ };
+ 
+ std::string
+@@ -224,12 +225,23 @@ load_kk_compute_bundle(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, KkComputeB
+     auto read_only = ",storage-buffer,read-only,root-srv" + suffix;
+     auto write_only = ",storage-buffer,write-only,root-uav" + suffix;
+     auto uniform = ",uniform-buffer,read-only,root-cbv" + suffix;
++    const std::string root_constants_prefix = ",uniform-buffer,read-only,root-constants,dwords";
+     if (valid_binding && descriptor.substr(binding_end) == read_only) {
+       bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_SRV;
+     } else if (valid_binding && descriptor.substr(binding_end) == write_only) {
+       bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_UAV;
+     } else if (valid_binding && descriptor.substr(binding_end) == uniform) {
+       bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_CBV;
++    } else if (valid_binding && descriptor.compare(binding_end, root_constants_prefix.size(), root_constants_prefix) == 0) {
++      auto count_begin = binding_end + root_constants_prefix.size();
++      auto count_end = descriptor.find(suffix, count_begin);
++      if (count_end == std::string::npos || count_end + suffix.size() != descriptor.size() ||
++          !parse_u32(descriptor.substr(count_begin, count_end - count_begin).c_str(), bundle.descriptor_dword_counts[i]) ||
++          bundle.descriptor_dword_counts[i] == 0 || bundle.descriptor_dword_counts[i] > D3D12_MAX_ROOT_COST) {
++        ERR("ADX12 root-constant reflection has an invalid DWORD count");
++        return KkBundleStatus::Invalid;
++      }
++      bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+     } else {
+       ERR("ADX12 compiler manifest descriptor reflection is incompatible");
+       return KkBundleStatus::Invalid;
+@@ -281,8 +293,7 @@ public:
+       return E_INVALIDARG;
+     if (kk_status == KkBundleStatus::Loaded) {
+       auto root_signature = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+-      if (root_signature == nullptr || root_signature->ParameterSlots != kk_bundle.descriptor_count ||
+-          root_signature->UploadQwords != kk_bundle.descriptor_count) {
++      if (root_signature == nullptr || root_signature->ParameterSlots != kk_bundle.descriptor_count) {
+         ERR("ADX12 KK compute root signature does not match reflected descriptor count");
+         return E_INVALIDARG;
+       }
+@@ -291,6 +302,11 @@ public:
+           ERR("ADX12 KK compute root descriptor type does not match reflection");
+           return E_INVALIDARG;
+         }
++        if (kk_bundle.descriptor_types[i] == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS &&
++            root_signature->ParameterDwordCounts[i] != kk_bundle.descriptor_dword_counts[i]) {
++          ERR("ADX12 KK compute root-constant count does not match reflection");
++          return E_INVALIDARG;
++        }
+       }
+ 
+       auto cs_lib = metal.newLibraryWithSource(kk_bundle.source, err);
+@@ -317,6 +333,8 @@ public:
+       threadgroup_size = kk_bundle.threadgroup_size;
+       UsesKkDescriptorAbi = 1;
+       KkDescriptorCount = kk_bundle.descriptor_count;
++      std::copy_n(kk_bundle.descriptor_types, kk_bundle.descriptor_count, KkDescriptorTypes);
++      std::copy_n(kk_bundle.descriptor_dword_counts, kk_bundle.descriptor_count, KkDescriptorDwordCounts);
+       KkRootSet0Offset = kk_bundle.root_set0_offset;
+       KkRootSize = kk_bundle.root_size;
+       Logger::info("ADX12_COMPILER_CACHE=admitted");
+diff --git a/src/d3d12/d3d12_root_signature.cpp b/src/d3d12/d3d12_root_signature.cpp
+index 3218329..6136a2f 100644
+--- a/src/d3d12/d3d12_root_signature.cpp
++++ b/src/d3d12/d3d12_root_signature.cpp
+@@ -371,6 +371,7 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
+   std::vector<uint8_t> blob_;
+   std::vector<uint32_t> qword_offsets_;
+   std::vector<D3D12_ROOT_PARAMETER_TYPE> parameter_types_;
++  std::vector<uint32_t> parameter_dword_counts_;
+ 
+   std::vector<Rc<Sampler>> static_samplers_; // which is not really "static"
+   /**
+@@ -413,6 +414,10 @@ public:
+           return E_INVALIDARG;
+         auto &parameter = desc.pParameters[i];
+         parameter_types_.push_back(parameter.ParameterType);
++        parameter_dword_counts_.push_back(
++            parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
++                ? parameter.Constants.Num32BitValues
++                : 0);
+         if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+           root_cost += 1;
+           bool is_normal_range = false, is_sampler_range = false;
+@@ -472,6 +477,7 @@ public:
+     ParameterSlots = qword_offsets_.size();
+     SlotQwordOffsets = qword_offsets_.data();
+     ParameterTypes = parameter_types_.data();
++    ParameterDwordCounts = parameter_dword_counts_.data();
+ 
+     return S_OK;
+   }
+-- 
+2.50.1
+

@@ -1,0 +1,41 @@
+From 1039fecbcf1d7db5085a2a896f106520051d4381 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 21:49:38 +0530
+Subject: [PATCH] d3d12: preserve class-local reflected bindings
+
+---
+ src/d3d12/d3d12_pipeline_compute.cpp | 17 +++++++++++------
+ 1 file changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 60d2194..07a1929 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -211,13 +211,18 @@ load_kk_compute_bundle(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, KkComputeB
+   for (uint32_t i = 0; i < bundle.descriptor_count; ++i) {
+     auto key = "descriptor_" + std::to_string(i);
+     auto suffix = ",parameter" + std::to_string(i);
+-    auto read_only = "set0,binding" + std::to_string(i) +
+-                     ",storage-buffer,read-only,root-srv" + suffix;
+-    auto write_only = "set0,binding" + std::to_string(i) +
+-                      ",storage-buffer,write-only,root-uav" + suffix;
+-    if (value(key.c_str()) == read_only) {
++    auto &descriptor = value(key.c_str());
++    const std::string binding_prefix = "set0,binding";
++    auto binding_end = descriptor.find(",storage-buffer,");
++    uint32_t binding = 0;
++    bool valid_binding = binding_end != std::string::npos &&
++                         descriptor.compare(0, binding_prefix.size(), binding_prefix) == 0 &&
++                         parse_u32(descriptor.substr(binding_prefix.size(), binding_end - binding_prefix.size()).c_str(), binding);
++    auto read_only = ",storage-buffer,read-only,root-srv" + suffix;
++    auto write_only = ",storage-buffer,write-only,root-uav" + suffix;
++    if (valid_binding && descriptor.substr(binding_end) == read_only) {
+       bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_SRV;
+-    } else if (value(key.c_str()) == write_only) {
++    } else if (valid_binding && descriptor.substr(binding_end) == write_only) {
+       bundle.descriptor_types[i] = D3D12_ROOT_PARAMETER_TYPE_UAV;
+     } else {
+       ERR("ADX12 compiler manifest descriptor reflection is incompatible");
+-- 
+2.50.1
+

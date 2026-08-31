@@ -1,0 +1,38 @@
+From e35b59963b23f22e8dba22194937bc5fa15742e9 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 13:05:17 +0530
+Subject: [PATCH] d3d12: validate placed buffer heap ranges
+
+---
+ src/d3d12/d3d12_device.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/d3d12/d3d12_device.cpp b/src/d3d12/d3d12_device.cpp
+index 7dd6c78..d60b10b 100644
+--- a/src/d3d12/d3d12_device.cpp
++++ b/src/d3d12/d3d12_device.cpp
+@@ -586,6 +586,22 @@ public:
+     hr = ValidateResourceStates(InitialState, &heap_desc.Properties);
+     if (FAILED(hr))
+       return hr;
++    const bool is_buffer = pDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
++    if ((is_buffer && (heap_desc.Flags & (D3D12_HEAP_FLAG_DENY_BUFFERS |
++                                         D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES |
++                                         D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES))) ||
++        (!is_buffer && (heap_desc.Flags & D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS)))
++      return E_INVALIDARG;
++
++    const UINT64 placement_alignment = is_buffer
++        ? D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT
++        : (pDesc->Alignment ? pDesc->Alignment
++                            : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
++    if ((Offset & (placement_alignment - 1)) != 0 ||
++        Offset > heap_desc.SizeInBytes)
++      return E_INVALIDARG;
++    if (is_buffer && pDesc->Width > heap_desc.SizeInBytes - Offset)
++      return E_INVALIDARG;
+     switch (pDesc->Dimension) {
+     case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+     case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+-- 
+2.50.1

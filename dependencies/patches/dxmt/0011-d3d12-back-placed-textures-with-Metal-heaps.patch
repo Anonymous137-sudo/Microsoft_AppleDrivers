@@ -1,0 +1,166 @@
+From 266c751622ce57b2426fa9e8739e1d7153ff1ff2 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 21:39:14 +0530
+Subject: [PATCH] d3d12: back placed textures with Metal heaps
+
+---
+ src/d3d12/d3d12_device.hpp  |  1 +
+ src/d3d12/d3d12_heap.cpp    | 33 ++++++++++++++++++++++++++++++++-
+ src/d3d12/d3d12_texture.cpp | 12 +++++++++++-
+ src/dxmt/dxmt_texture.cpp   | 14 +++++++++++++-
+ src/dxmt/dxmt_texture.hpp   |  3 ++-
+ 5 files changed, 59 insertions(+), 4 deletions(-)
+
+diff --git a/src/d3d12/d3d12_device.hpp b/src/d3d12/d3d12_device.hpp
+index 1b18e53..ddd7f49 100644
+--- a/src/d3d12/d3d12_device.hpp
++++ b/src/d3d12/d3d12_device.hpp
+@@ -85,6 +85,7 @@ public:
+ 
+ class MTLD3D12Heap : public ID3D12Heap {
+ public:
++  virtual WMT::Heap GetMTLHeap() = 0;
+ };
+ 
+ class MTLD3D12Fence : public ID3D12Fence1 {
+diff --git a/src/d3d12/d3d12_heap.cpp b/src/d3d12/d3d12_heap.cpp
+index 2f49e27..9733bd9 100644
+--- a/src/d3d12/d3d12_heap.cpp
++++ b/src/d3d12/d3d12_heap.cpp
+@@ -25,6 +25,7 @@ namespace dxmt {
+ class MTLD3D12HeapImpl : public MTLD3D12Pageable<MTLD3D12Heap> {
+ 
+   D3D12_HEAP_DESC desc_;
++  WMT::Reference<WMT::Heap> heap_;
+ 
+ public:
+   MTLD3D12HeapImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Heap>(pDevice) {}
+@@ -77,9 +78,39 @@ public:
+     if (!size_aligned)
+       return E_INVALIDARG;
+ 
++    WMTResourceOptions options = WMTResourceHazardTrackingModeUntracked;
++    switch (pDesc->Properties.Type) {
++    case D3D12_HEAP_TYPE_DEFAULT:
++      options = static_cast<WMTResourceOptions>(options | WMTResourceStorageModePrivate);
++      break;
++    case D3D12_HEAP_TYPE_UPLOAD:
++      options = static_cast<WMTResourceOptions>(options | WMTResourceOptionCPUCacheModeWriteCombined);
++      break;
++    case D3D12_HEAP_TYPE_READBACK:
++    case D3D12_HEAP_TYPE_CUSTOM:
++      break;
++    default:
++      return E_INVALIDARG;
++    }
++
++    WMTHeapInfo heap_info = {
++        .size = size_aligned,
++        .options = options,
++        .type = WMTHeapTypePlacement,
++        .sparse_page_size = WMTSparsePageSize16,
++    };
++    heap_ = device_->GetMTLDevice().newHeap(heap_info);
++    if (!heap_)
++      return E_OUTOFMEMORY;
++
+     return S_OK;
+   }
+ 
++  WMT::Heap
++  GetMTLHeap() final {
++    return heap_;
++  }
++
+   virtual D3D12_HEAP_DESC *STDMETHODCALLTYPE
+   GetDesc(D3D12_HEAP_DESC *__ret) {
+     *__ret = desc_;
+@@ -99,4 +130,4 @@ CreateHeap(MTLD3D12Device *pDevice, const D3D12_HEAP_DESC *pDesc, REFIID riid, v
+   return heap->QueryInterface(riid, ppHeap);
+ }
+ 
+-}; // namespace dxmt
+\ No newline at end of file
++}; // namespace dxmt
+diff --git a/src/d3d12/d3d12_texture.cpp b/src/d3d12/d3d12_texture.cpp
+index 6ef1ede..36131d4 100644
+--- a/src/d3d12/d3d12_texture.cpp
++++ b/src/d3d12/d3d12_texture.cpp
+@@ -172,6 +172,7 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
+   D3D12_RESOURCE_DESC desc_;
+   D3D12_HEAP_PROPERTIES heap_props_;
+   D3D12_HEAP_FLAGS heap_flags_;
++  Com<MTLD3D12Heap> parent_heap_;
+ 
+ public:
+   MTLD3D12Texture(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Resource>(pDevice) {}
+@@ -206,7 +207,16 @@ public:
+ 
+     texture = new Texture(texture_info, device_->GetMTLDevice());
+     Flags<TextureAllocationFlag> flags = {};
+-    texture->rename(texture->allocate(flags));
++    Rc<TextureAllocation> allocation;
++    if (pHeap) {
++      parent_heap_ = pHeap;
++      allocation = texture->allocate(pHeap->GetMTLHeap(), HeapOffset, flags);
++    } else {
++      allocation = texture->allocate(flags);
++    }
++    if (!allocation)
++      return E_OUTOFMEMORY;
++    texture->rename(std::move(allocation));
+     device_->RegisterResidency(texture->current()->texture());
+ 
+     return S_OK;
+diff --git a/src/dxmt/dxmt_texture.cpp b/src/dxmt/dxmt_texture.cpp
+index 8db2874..f0014bc 100644
+--- a/src/dxmt/dxmt_texture.cpp
++++ b/src/dxmt/dxmt_texture.cpp
+@@ -203,6 +203,18 @@ Texture::allocate(Flags<TextureAllocationFlag> flags) {
+   return new TextureAllocation(this, std::move(texture), info, flags);
+ }
+ 
++Rc<TextureAllocation>
++Texture::allocate(WMT::Heap heap, uint64_t offset, Flags<TextureAllocationFlag> flags) {
++  WMTTextureInfo info = info_;
++  info.mach_port = 0;
++  info.options = static_cast<WMTResourceOptions>(
++      WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModePrivate);
++  auto texture = heap.newTexture(info, offset);
++  if (!texture)
++    return nullptr;
++  return new TextureAllocation(this, std::move(texture), info, flags);
++}
++
+ Rc<TextureAllocation>
+ Texture::import(mach_port_t mach_port) {
+   Flags<TextureAllocationFlag> flags;
+@@ -349,4 +361,4 @@ RenamableTexturePool::getNext(uint64_t frame) {
+   return allocations_[current_index];
+ }
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/dxmt/dxmt_texture.hpp b/src/dxmt/dxmt_texture.hpp
+index 68d43cd..816df4c 100644
+--- a/src/dxmt/dxmt_texture.hpp
++++ b/src/dxmt/dxmt_texture.hpp
+@@ -275,6 +275,7 @@ public:
+   TextureViewKey fullView;
+ 
+   Rc<TextureAllocation> allocate(Flags<TextureAllocationFlag> flags);
++  Rc<TextureAllocation> allocate(WMT::Heap heap, uint64_t offset, Flags<TextureAllocationFlag> flags);
+   Rc<TextureAllocation> import(mach_port_t mach_port);
+ 
+   TextureView &view(TextureViewKey key);
+@@ -323,4 +324,4 @@ private:
+   std::atomic<uint32_t> refcount_ = {0u};
+ };
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+-- 
+2.50.1
+

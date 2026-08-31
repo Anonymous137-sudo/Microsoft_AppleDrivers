@@ -1,0 +1,225 @@
+From 4acc7f341151ac4ee9984fe0e920cb4cb3d1a0f5 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 12:51:20 +0530
+Subject: [PATCH] d3d12: add bounded KK UAV tables and buffer allocation semantics
+
+---
+ src/d3d12/d3d12_command_list.cpp     | 30 ++++++++++----------
+ src/d3d12/d3d12_device.cpp           | 41 ++++++++++++++++++++++++++--
+ src/d3d12/d3d12_device.hpp           |  1 +
+ src/d3d12/d3d12_pipeline_compute.cpp | 32 +++++++++++++++++-----
+ src/d3d12/d3d12_resource_helper.cpp  |  8 +++++-
+ 5 files changed, 88 insertions(+), 24 deletions(-)
+
+diff --git a/src/d3d12/d3d12_command_list.cpp b/src/d3d12/d3d12_command_list.cpp
+index 2b9f53a..0718bcf 100644
+--- a/src/d3d12/d3d12_command_list.cpp
++++ b/src/d3d12/d3d12_command_list.cpp
+@@ -525,20 +525,22 @@ public:
+     };
+     static_assert(sizeof(KkBufferAddress) == 16);
+ 
+-    auto resource_va = rootarg_compute_staging_[pRootSig->SlotQwordOffsets[0]];
+-    uint64_t resource_offset = 0;
+-    auto allocation = device_->LookupBufferByVA(resource_va, &resource_offset);
+-    if (allocation == nullptr || resource_offset >= allocation->length())
+-      return std::numeric_limits<uint64_t>::max();
+-
+-    auto [descriptor_ptr, descriptor_offset] = allocator_->AllocateGPUHeap(sizeof(KkBufferAddress), 16);
+-    auto descriptor = reinterpret_cast<KkBufferAddress *>(descriptor_ptr);
+-    uint64_t remaining = allocation->length() - resource_offset;
+-    descriptor->base_address = resource_va;
+-    descriptor->size = remaining > std::numeric_limits<uint32_t>::max()
+-                           ? std::numeric_limits<uint32_t>::max()
+-                           : static_cast<uint32_t>(remaining);
+-    descriptor->zero = 0;
++    auto descriptor_size = sizeof(KkBufferAddress) * pPSO->KkDescriptorCount;
++    auto [descriptor_ptr, descriptor_offset] = allocator_->AllocateGPUHeap(descriptor_size, 16);
++    auto descriptors = reinterpret_cast<KkBufferAddress *>(descriptor_ptr);
++    for (uint32_t i = 0; i < pPSO->KkDescriptorCount; ++i) {
++      auto resource_va = rootarg_compute_staging_[pRootSig->SlotQwordOffsets[i]];
++      uint64_t resource_offset = 0;
++      auto allocation = device_->LookupBufferByVA(resource_va, &resource_offset);
++      if (allocation == nullptr || resource_offset >= allocation->length())
++        return std::numeric_limits<uint64_t>::max();
++      uint64_t remaining = allocation->length() - resource_offset;
++      descriptors[i].base_address = resource_va;
++      descriptors[i].size = remaining > std::numeric_limits<uint32_t>::max()
++                                ? std::numeric_limits<uint32_t>::max()
++                                : static_cast<uint32_t>(remaining);
++      descriptors[i].zero = 0;
++    }
+ 
+     auto [root_ptr, root_offset] = allocator_->AllocateGPUHeap(pPSO->KkRootSize, 64);
+     memset(root_ptr, 0, pPSO->KkRootSize);
+diff --git a/src/d3d12/d3d12_device.cpp b/src/d3d12/d3d12_device.cpp
+index 4ea8827..7dd6c78 100644
+--- a/src/d3d12/d3d12_device.cpp
++++ b/src/d3d12/d3d12_device.cpp
+@@ -459,7 +459,44 @@ public:
+   D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE GetResourceAllocationInfo(
+       D3D12_RESOURCE_ALLOCATION_INFO *__ret, UINT VisibleMask, UINT ResourceDestCount, const D3D12_RESOURCE_DESC *pDescs
+   ) {
+-    IMPLEMENT_ME
++    __ret->SizeInBytes = 0;
++    __ret->Alignment = 0;
++    if (ResourceDestCount == 0)
++      return __ret;
++    if (pDescs == nullptr) {
++      __ret->SizeInBytes = UINT64_MAX;
++      return __ret;
++    }
++
++    UINT64 offset = 0;
++    UINT64 max_alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
++    for (UINT i = 0; i < ResourceDestCount; ++i) {
++      const auto &desc = pDescs[i];
++      if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
++          FAILED(ValidateResourceDescs(&desc, D3D12_HEAP_TYPE_DEFAULT))) {
++        __ret->SizeInBytes = UINT64_MAX;
++        __ret->Alignment = 0;
++        return __ret;
++      }
++      UINT64 alignment = desc.Alignment ? desc.Alignment : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
++      if (alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT ||
++          desc.Width > UINT64_MAX - alignment + 1) {
++        __ret->SizeInBytes = UINT64_MAX;
++        __ret->Alignment = 0;
++        return __ret;
++      }
++      offset = align(offset, alignment);
++      if (desc.Width > UINT64_MAX - offset) {
++        __ret->SizeInBytes = UINT64_MAX;
++        __ret->Alignment = 0;
++        return __ret;
++      }
++      offset += desc.Width;
++      max_alignment = std::max(max_alignment, alignment);
++    }
++    __ret->SizeInBytes = align(offset, max_alignment);
++    __ret->Alignment = max_alignment;
++    return __ret;
+   };
+ 
+   D3D12_HEAP_PROPERTIES *STDMETHODCALLTYPE
+@@ -1068,4 +1105,4 @@ CreateD3D12Device(IMTLDXGIAdapter *adapter, const IID &riid, void **ppDevice) {
+   return device->QueryInterface(riid, ppDevice);
+ };
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/d3d12/d3d12_device.hpp b/src/d3d12/d3d12_device.hpp
+index 3d534f4..97921ee 100644
+--- a/src/d3d12/d3d12_device.hpp
++++ b/src/d3d12/d3d12_device.hpp
+@@ -154,6 +154,7 @@ public:
+   WMT::Reference<WMT::ComputePipelineState> pso;
+   WMTSize threadgroup_size;
+   UINT UsesKkDescriptorAbi = 0;
++  uint32_t KkDescriptorCount = 0;
+   uint32_t KkRootSet0Offset = 0;
+   uint32_t KkRootSize = 0;
+ 
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 25937da..965c8b7 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -49,6 +49,7 @@ struct KkComputeBundle {
+   WMTSize threadgroup_size;
+   uint32_t root_set0_offset;
+   uint32_t root_size;
++  uint32_t descriptor_count;
+ };
+ 
+ std::string
+@@ -193,13 +194,12 @@ load_kk_compute_bundle(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, KkComputeB
+   auto &root_set0_offset = value("kk_root_set0_offset");
+   auto &root_size = value("kk_root_size");
+   auto &descriptor_count = value("descriptor_count");
+-  auto &descriptor0 = value("descriptor_0");
+-
+   if (schema != "adx12-compiler-cache-v1" || compiler_abi != "2" ||
+       !is_hex_sha256(cache_key) || !is_hex_sha256(expected_dxil) ||
+       !is_hex_sha256(expected_msl) || !is_relative_filename(msl_file) ||
+-      stage != "compute" || entrypoint.empty() || descriptor_count != "1" ||
+-      descriptor0 != "set0,binding0,storage-buffer,write-only,root-uav,parameter0" ||
++      stage != "compute" || entrypoint.empty() ||
++      !parse_u32(descriptor_count.c_str(), bundle.descriptor_count) ||
++      bundle.descriptor_count < 1 || bundle.descriptor_count > 16 ||
+       !parse_threadgroup(threadgroup.c_str(), bundle.threadgroup_size) ||
+       !parse_u32(root_set0_offset.c_str(), bundle.root_set0_offset) ||
+       !parse_u32(root_size.c_str(), bundle.root_size)) {
+@@ -207,6 +207,17 @@ load_kk_compute_bundle(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, KkComputeB
+     return KkBundleStatus::Invalid;
+   }
+ 
++  for (uint32_t i = 0; i < bundle.descriptor_count; ++i) {
++    auto expected = "set0,binding" + std::to_string(i) +
++                    ",storage-buffer,write-only,root-uav,parameter" +
++                    std::to_string(i);
++    auto key = "descriptor_" + std::to_string(i);
++    if (value(key.c_str()) != expected) {
++      ERR("ADX12 compiler manifest descriptor reflection is incompatible");
++      return KkBundleStatus::Invalid;
++    }
++  }
++
+   if ((bundle.root_set0_offset & 7) || (bundle.root_size & 7) ||
+       bundle.root_size < bundle.root_set0_offset + sizeof(uint64_t) ||
+       bundle.root_size > 64 * 1024) {
+@@ -252,11 +263,17 @@ public:
+       return E_INVALIDARG;
+     if (kk_status == KkBundleStatus::Loaded) {
+       auto root_signature = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+-      if (root_signature == nullptr || root_signature->ParameterSlots != 1 || root_signature->UploadQwords != 1 ||
+-          root_signature->ParameterTypes[0] != D3D12_ROOT_PARAMETER_TYPE_UAV) {
+-        ERR("ADX12 KK phase-2 compute requires one root UAV");
++      if (root_signature == nullptr || root_signature->ParameterSlots != kk_bundle.descriptor_count ||
++          root_signature->UploadQwords != kk_bundle.descriptor_count) {
++        ERR("ADX12 KK compute root signature does not match reflected UAV count");
+         return E_INVALIDARG;
+       }
++      for (uint32_t i = 0; i < kk_bundle.descriptor_count; ++i) {
++        if (root_signature->ParameterTypes[i] != D3D12_ROOT_PARAMETER_TYPE_UAV) {
++          ERR("ADX12 KK compute requires reflected root UAV parameters");
++          return E_INVALIDARG;
++        }
++      }
+ 
+       auto cs_lib = metal.newLibraryWithSource(kk_bundle.source, err);
+       if (!cs_lib) {
+@@ -281,6 +298,7 @@ public:
+ 
+       threadgroup_size = kk_bundle.threadgroup_size;
+       UsesKkDescriptorAbi = 1;
++      KkDescriptorCount = kk_bundle.descriptor_count;
+       KkRootSet0Offset = kk_bundle.root_set0_offset;
+       KkRootSize = kk_bundle.root_size;
+       Logger::info("ADX12_COMPILER_CACHE=admitted");
+diff --git a/src/d3d12/d3d12_resource_helper.cpp b/src/d3d12/d3d12_resource_helper.cpp
+index 17c7975..0a06298 100644
+--- a/src/d3d12/d3d12_resource_helper.cpp
++++ b/src/d3d12/d3d12_resource_helper.cpp
+@@ -326,6 +326,12 @@ ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_TYPE HeapType
+ 
+   switch (pDesc->Dimension) {
+   case D3D12_RESOURCE_DIMENSION_BUFFER: {
++    if (pDesc->Width == 0 || pDesc->Height != 1 ||
++        pDesc->DepthOrArraySize != 1 || pDesc->MipLevels != 1 ||
++        pDesc->Format != DXGI_FORMAT_UNKNOWN || pDesc->SampleDesc.Count != 1 ||
++        pDesc->SampleDesc.Quality != 0 ||
++        pDesc->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR)
++      return E_INVALIDARG;
+     if (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
+       return E_INVALIDARG;
+     break;
+@@ -431,4 +437,4 @@ DecomposeSubresource(
+   return MipLevels;
+ }
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+-- 
+2.50.1

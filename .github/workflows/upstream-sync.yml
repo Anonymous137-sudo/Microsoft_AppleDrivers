@@ -1,0 +1,69 @@
+name: ADX12 upstream synchronization
+
+on:
+  schedule:
+    - cron: "31 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare-candidate:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      ADX12_SYNC_OUTPUT_DIR: ${{ github.workspace }}/artifacts/upstream-sync
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare and validate all upstream candidates
+        run: |
+          ./scripts/adx12-upstream-sync.sh prepare all
+          ./scripts/adx12-upstream-sync.sh verify all \
+            artifacts/upstream-sync/candidate-upstreams.lock.tsv
+
+      - name: Run updater and frontend regressions
+        run: |
+          ./scripts/test-upstream-sync.sh
+          ./scripts/test-frontend.sh
+
+      - name: Detect lock changes
+        id: changes
+        shell: bash
+        run: |
+          candidate=artifacts/upstream-sync/candidate-upstreams.lock.tsv
+          if cmp -s dependencies/upstreams.lock.tsv "$candidate"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            cp "$candidate" dependencies/upstreams.lock.tsv
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open review pull request
+        if: ${{ steps.changes.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          branch="automation/adx12-upstream-sync-${GITHUB_RUN_ID}"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git add dependencies/upstreams.lock.tsv
+          git commit -m "chore: refresh ADX12 upstream pins"
+          git push origin "$branch"
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "chore: refresh ADX12 upstream pins" \
+            --body-file artifacts/upstream-sync/prepare-report.md
+
+      - name: Preserve synchronization reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: adx12-upstream-sync-${{ github.run_id }}
+          path: artifacts/upstream-sync
+          if-no-files-found: error

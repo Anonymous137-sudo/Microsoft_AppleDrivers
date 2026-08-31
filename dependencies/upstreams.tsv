@@ -1,0 +1,10 @@
+# name|url|branch|license|integration|required_paths|role|submodules
+dxmt|https://github.com/3Shain/dxmt.git|main|LGPL-2.1-or-later|patch-queue|src/d3d12,src/winemetal|D3D12/DXGI and WineMetal implementation baseline|recursive
+vkd3d-proton|https://github.com/HansKristian-Work/vkd3d-proton.git|master|LGPL-2.1-or-later|semantic-donor|libs/vkd3d,tests|Primary D3D12 semantic donor and compatibility test corpus|recursive
+wine-vkd3d|https://gitlab.winehq.org/wine/vkd3d.git|master|LGPL-2.1-or-later|reference|libs/vkd3d,libs/vkd3d-shader|ABI and shader reference|none
+dxil-spirv|https://github.com/HansKristian-Work/dxil-spirv.git|master|MIT|patch-queue|dxil_spirv_c.h,CMakeLists.txt|DXIL parsing and SPIR-V lowering|recursive
+mesa|https://gitlab.freedesktop.org/mesa/mesa.git|main|MIT|patch-queue|src/compiler/nir,src/compiler/spirv,src/kosmickrisp|VTN NIR optimization and KosmicKrisp NIR-to-MSL|none
+directx-headers|https://github.com/microsoft/DirectX-Headers.git|main|MIT|reference|include/directx/d3d12.h|Canonical D3D12 interfaces and feature definitions|none
+d3d12-translation-layer|https://github.com/microsoft/D3D12TranslationLayer.git|master|MIT|reference|include,src|Allocation batching and residency reference|none
+wine|https://gitlab.winehq.org/wine/wine.git|master|LGPL-2.1-or-later|patch-queue|dlls/ntdll,include/wine|Windows ABI and PE Unix-call host environment|none
+directx-shader-compiler|https://github.com/microsoft/DirectXShaderCompiler.git|main|NCSA|tool|include/dxc,lib/DXIL|DXIL production validation and test tooling|recursive

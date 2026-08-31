@@ -1,0 +1,181 @@
+From a7a2987a0fc6836fd3ca2d40585c41224177a511 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 13:29:07 +0530
+Subject: [PATCH] d3d12: query and validate placed texture allocations
+
+---
+ meson.build                 |  3 +++
+ src/d3d12/d3d12_device.cpp  | 45 +++++++++++++++++++++++++------------
+ src/d3d12/d3d12_device.hpp  |  5 +++++
+ src/d3d12/d3d12_texture.cpp | 34 ++++++++++++++++++++++++----
+ 4 files changed, 69 insertions(+), 18 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index e10c901..885b73b 100644
+--- a/meson.build
++++ b/meson.build
+@@ -67,6 +67,9 @@ native_compiler_args = [
+   '-Wno-unused-const-variable',
+   '-Wno-missing-braces',
+   '-fblocks',
++  '-ffile-prefix-map=' + meson.project_source_root() + '/=/usr/src/adx12/dxmt/',
++  '-fdebug-prefix-map=' + meson.project_source_root() + '/=/usr/src/adx12/dxmt/',
++  '-fmacro-prefix-map=' + meson.project_source_root() + '/=/usr/src/adx12/dxmt/',
+ ]
+ 
+ link_args = []
+diff --git a/src/d3d12/d3d12_device.cpp b/src/d3d12/d3d12_device.cpp
+index f409d0e..bd1e904 100644
+--- a/src/d3d12/d3d12_device.cpp
++++ b/src/d3d12/d3d12_device.cpp
+@@ -472,28 +472,44 @@ public:
+     UINT64 max_alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+     for (UINT i = 0; i < ResourceDestCount; ++i) {
+       const auto &desc = pDescs[i];
+-      if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
+-          FAILED(ValidateResourceDescs(&desc, D3D12_HEAP_TYPE_DEFAULT))) {
++      if (FAILED(ValidateResourceDescs(&desc, D3D12_HEAP_TYPE_DEFAULT))) {
+         __ret->SizeInBytes = UINT64_MAX;
+         __ret->Alignment = 0;
+         return __ret;
+       }
++      UINT64 size = desc.Width;
+       UINT64 alignment = desc.Alignment ? desc.Alignment : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+-      if (alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT ||
+-          desc.Width > UINT64_MAX - alignment + 1) {
+-        __ret->SizeInBytes = UINT64_MAX;
+-        __ret->Alignment = 0;
+-        return __ret;
++      if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
++        if (alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT ||
++            size > UINT64_MAX - alignment + 1) {
++          __ret->SizeInBytes = UINT64_MAX;
++          __ret->Alignment = 0;
++          return __ret;
++        }
++      } else {
++        D3D12_RESOURCE_ALLOCATION_INFO texture_info = {};
++        if (FAILED(GetTextureAllocationInfo(this, &desc, &texture_info))) {
++          __ret->SizeInBytes = UINT64_MAX;
++          __ret->Alignment = 0;
++          return __ret;
++        }
++        size = texture_info.SizeInBytes;
++        alignment = texture_info.Alignment;
+       }
+       offset = align(offset, alignment);
+-      if (desc.Width > UINT64_MAX - offset) {
++      if (size > UINT64_MAX - offset) {
+         __ret->SizeInBytes = UINT64_MAX;
+         __ret->Alignment = 0;
+         return __ret;
+       }
+-      offset += desc.Width;
++      offset += size;
+       max_alignment = std::max(max_alignment, alignment);
+     }
++    if (offset > UINT64_MAX - max_alignment + 1) {
++      __ret->SizeInBytes = UINT64_MAX;
++      __ret->Alignment = 0;
++      return __ret;
++    }
+     __ret->SizeInBytes = align(offset, max_alignment);
+     __ret->Alignment = max_alignment;
+     return __ret;
+@@ -593,14 +609,15 @@ public:
+         (!is_buffer && (heap_desc.Flags & deny_all_textures) == deny_all_textures))
+       return E_INVALIDARG;
+ 
+-    const UINT64 placement_alignment = is_buffer
+-        ? D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT
+-        : (pDesc->Alignment ? pDesc->Alignment
+-                            : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
++    D3D12_RESOURCE_ALLOCATION_INFO allocation_info = {
++        pDesc->Width, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT};
++    if (!is_buffer && FAILED(GetTextureAllocationInfo(this, pDesc, &allocation_info)))
++      return E_INVALIDARG;
++    const UINT64 placement_alignment = allocation_info.Alignment;
+     if ((Offset & (placement_alignment - 1)) != 0 ||
+         Offset > heap_desc.SizeInBytes)
+       return E_INVALIDARG;
+-    if (is_buffer && pDesc->Width > heap_desc.SizeInBytes - Offset)
++    if (allocation_info.SizeInBytes > heap_desc.SizeInBytes - Offset)
+       return E_INVALIDARG;
+     switch (pDesc->Dimension) {
+     case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+diff --git a/src/d3d12/d3d12_device.hpp b/src/d3d12/d3d12_device.hpp
+index 97921ee..1b18e53 100644
+--- a/src/d3d12/d3d12_device.hpp
++++ b/src/d3d12/d3d12_device.hpp
+@@ -209,6 +209,11 @@ HRESULT CreateCommittedTexture(
+     REFIID riid, void **ppResource
+ );
+ 
++HRESULT GetTextureAllocationInfo(
++    MTLD3D12Device *pDevice, const D3D12_RESOURCE_DESC *pDesc,
++    D3D12_RESOURCE_ALLOCATION_INFO *pInfo
++);
++
+ HRESULT
+ CreatePlacedTexture(
+     MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC *pDesc,
+diff --git a/src/d3d12/d3d12_texture.cpp b/src/d3d12/d3d12_texture.cpp
+index 7c904d2..6ef1ede 100644
+--- a/src/d3d12/d3d12_texture.cpp
++++ b/src/d3d12/d3d12_texture.cpp
+@@ -122,6 +122,35 @@ PopulateWMTTextureInfo(WMT::Device Device, WMTTextureInfo &InfoOut, const D3D12_
+   return S_OK;
+ };
+ 
++HRESULT
++GetTextureAllocationInfo(
++    MTLD3D12Device *pDevice, const D3D12_RESOURCE_DESC *pDesc,
++    D3D12_RESOURCE_ALLOCATION_INFO *pInfo
++) {
++  WMTTextureInfo texture_info = {};
++  HRESULT hr = PopulateWMTTextureInfo(pDevice->GetMTLDevice(), texture_info, *pDesc);
++  if (FAILED(hr))
++    return hr;
++
++  const WMTSizeAndAlign metal_info =
++      pDevice->GetMTLDevice().heapTextureSizeAndAlign(texture_info);
++  if (!metal_info.size || !metal_info.align)
++    return E_INVALIDARG;
++
++  const UINT64 requested_alignment = pDesc->Alignment
++      ? pDesc->Alignment
++      : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
++  if (requested_alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
++    return E_INVALIDARG;
++
++  pInfo->Alignment = std::max<UINT64>(metal_info.align, requested_alignment);
++  if ((pInfo->Alignment & (pInfo->Alignment - 1)) != 0 ||
++      metal_info.size > UINT64_MAX - pInfo->Alignment + 1)
++    return E_INVALIDARG;
++  pInfo->SizeInBytes = align(static_cast<UINT64>(metal_info.size), pInfo->Alignment);
++  return pInfo->SizeInBytes ? S_OK : E_INVALIDARG;
++}
++
+ WMTPixelFormat
+ EncodeComponentMapping(UINT Shader4ComponentMapping, WMTPixelFormat Format) {
+ 
+@@ -763,9 +792,6 @@ CreatePlacedTexture(
+   auto texture = Com(new MTLD3D12Texture(pDevice));
+   D3D12_HEAP_DESC heap_desc = pHeap->GetDesc();
+ 
+-  if (heap_desc.Flags & D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS)
+-    return E_INVALIDARG;
+-
+   HRESULT hr = texture->Initialize(&heap_desc.Properties, heap_desc.Flags, pDesc, InitialState, pHeap, HeapOffset);
+   if (FAILED(hr))
+     return hr;
+@@ -774,4 +800,4 @@ CreatePlacedTexture(
+   return texture->QueryInterface(riid, ppResource);
+ }
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+-- 
+2.50.1
+

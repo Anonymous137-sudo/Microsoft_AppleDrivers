@@ -1,0 +1,30 @@
+From 9437438e3fff5ff650610c8d2f1a8f347ba60a26 Mon Sep 17 00:00:00 2001
+From: ADX12 upstream sync <adx12-sync@invalid.example>
+Date: Tue, 25 Aug 2026 13:07:57 +0530
+Subject: [PATCH] d3d12: classify composite placed heap flags correctly
+
+---
+ src/d3d12/d3d12_device.cpp | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/d3d12/d3d12_device.cpp b/src/d3d12/d3d12_device.cpp
+index d60b10b..f409d0e 100644
+--- a/src/d3d12/d3d12_device.cpp
++++ b/src/d3d12/d3d12_device.cpp
+@@ -587,10 +587,10 @@ public:
+     if (FAILED(hr))
+       return hr;
+     const bool is_buffer = pDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+-    if ((is_buffer && (heap_desc.Flags & (D3D12_HEAP_FLAG_DENY_BUFFERS |
+-                                         D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES |
+-                                         D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES))) ||
+-        (!is_buffer && (heap_desc.Flags & D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS)))
++    const auto deny_all_textures = D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES |
++                                   D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES;
++    if ((is_buffer && (heap_desc.Flags & D3D12_HEAP_FLAG_DENY_BUFFERS)) ||
++        (!is_buffer && (heap_desc.Flags & deny_all_textures) == deny_all_textures))
+       return E_INVALIDARG;
+ 
+     const UINT64 placement_alignment = is_buffer
+-- 
+2.50.1
