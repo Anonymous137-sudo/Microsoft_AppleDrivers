@@ -26,6 +26,9 @@ force-push a fork, or silently replace a lock.
 - `dependencies/upstreams.lock.tsv`: accepted immutable commit for each source;
 - `dependencies/patches/<component>/*.patch`: ordered downstream commits;
 - `dependencies/overlays/<component>/`: new ADX12-owned files;
+- `source/dxmt-adx12/`: complete reviewed export of the assembled DXMT
+  downstream used by normal builds;
+- `third_party/<component>`: browsable gitlinks for accepted external pins;
 - `artifacts/upstream-sync/`: generated status, candidate locks, and reports.
 
 Required-path checks prevent a successful Git merge from hiding an upstream
@@ -52,6 +55,14 @@ Materialize exactly one accepted dependency for a build:
 
 ```sh
 ./scripts/adx12-upstream-sync.sh materialize dxmt .adx12-deps/dxmt
+```
+
+Normal runtime builds do not require that hidden materialization. They consume
+`source/dxmt-adx12/` and validate its provenance against the accepted lock and
+patch queue:
+
+```sh
+./scripts/verify-visible-dxmt-source.sh
 ```
 
 Verify all accepted pins and downstream deltas:
@@ -82,6 +93,8 @@ does not merge the pull request. A candidate is promoted only after:
 
 If upstream rewrites history, removes a required subsystem, or conflicts with a
 downstream patch, the update fails closed with the accepted lock unchanged.
+Promotion also refreshes the visible assembled source and matching gitlink;
+changing only a lock or patch queue is incomplete.
 
 ## Dependency Boundaries
 

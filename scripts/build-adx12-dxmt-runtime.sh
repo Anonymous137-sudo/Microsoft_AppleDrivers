@@ -72,7 +72,7 @@ short_commit=$(printf '%.8s' "$dxmt_commit")
 short_patchset=$(printf '%.8s' "$patchset_sha256")
 baseline_runtime=${1:-"$dependency_root/runtime-$short_commit"}
 runtime_root=${2:-"$dependency_root/runtime-$short_commit-adx12-$short_patchset"}
-source_root=${ADX12_DXMT_SOURCE:-"$dependency_root/dxmt-$short_commit-adx12-$short_patchset"}
+source_root=${ADX12_DXMT_SOURCE:-"$repo_root/source/dxmt-adx12"}
 build_root=${ADX12_DXMT_BUILD_DIR:-"$dependency_root/build-dxmt-$short_commit-adx12-$short_patchset"}
 builtin_build_root=${ADX12_DXMT_BUILTIN_BUILD_DIR:-"$build_root-winemetal-builtin"}
 wine_sdk_archive=${ADX12_WINE_SDK_ARCHIVE:-"$dependency_root/toolchains/wine-dxmt.tar.gz"}
@@ -105,36 +105,40 @@ baseline_commit=$(sed -n 's/^ADX12_BASELINE_COMMIT=//p' \
     printf 'ADX12 DXMT build: baseline runtime checksum verification failed\n' >&2
     exit 1
 }
-if [ ! -e "$source_root" ]; then
-    "$script_dir/adx12-upstream-sync.sh" \
-        materialize dxmt "$source_root" >/dev/null
-fi
-[ -d "$source_root/.git" ] || {
-    printf 'ADX12 DXMT build: invalid source checkout: %s\n' "$source_root" >&2
-    exit 1
-}
-git -C "$source_root" merge-base --is-ancestor "$dxmt_commit" HEAD || {
-    printf 'ADX12 DXMT build: source checkout lost the pinned ancestor\n' >&2
-    exit 1
-}
-git -C "$source_root" diff --quiet &&
-    git -C "$source_root" diff --cached --quiet || {
-    printf 'ADX12 DXMT build: source checkout contains unrecorded edits\n' >&2
-    exit 1
-}
-git -C "$source_root" diff --check "$dxmt_commit..HEAD"
-while IFS= read -r queued_patch; do
-    patch_subject=$(sed -n 's/^Subject: \[PATCH\] //p' "$queued_patch" | head -n 1)
-    [ -n "$patch_subject" ] &&
-        git -C "$source_root" log --format=%s "$dxmt_commit..HEAD" |
-            grep -Fqx "$patch_subject" || {
-        printf 'ADX12 DXMT build: source checkout lacks patch: %s\n' \
-            "$queued_patch" >&2
+if [ -e "$source_root/.git" ]; then
+    git -C "$source_root" merge-base --is-ancestor "$dxmt_commit" HEAD || {
+        printf 'ADX12 DXMT build: source checkout lost the pinned ancestor\n' >&2
         exit 1
     }
-done <<EOF
+    git -C "$source_root" diff --quiet &&
+        git -C "$source_root" diff --cached --quiet || {
+        printf 'ADX12 DXMT build: source checkout contains unrecorded edits\n' >&2
+        exit 1
+    }
+    git -C "$source_root" diff --check "$dxmt_commit..HEAD"
+    while IFS= read -r queued_patch; do
+        patch_subject=$(sed -n 's/^Subject: \[PATCH\] //p' "$queued_patch" |
+            head -n 1)
+        [ -n "$patch_subject" ] &&
+            git -C "$source_root" log --format=%s "$dxmt_commit..HEAD" |
+                grep -Fqx "$patch_subject" || {
+            printf 'ADX12 DXMT build: source checkout lacks patch: %s\n' \
+                "$queued_patch" >&2
+            exit 1
+        }
+    done <<EOF
 $patch_list
 EOF
+    source_date_epoch=$(git -C "$source_root" show -s --format=%ct "$dxmt_commit")
+else
+    "$script_dir/verify-visible-dxmt-source.sh" "$source_root" >/dev/null
+    provenance="$source_root/ADX12_SOURCE_PROVENANCE"
+    source_date_epoch=$(sed -n 's/^source_date_epoch=//p' "$provenance")
+    [ -n "$source_date_epoch" ] || {
+        printf 'ADX12 DXMT build: visible source epoch is missing\n' >&2
+        exit 1
+    }
+fi
 grep -q 'ADX12GetCompilerABI' "$source_root/src/d3d12/d3d12.def" || {
     printf 'ADX12 DXMT build: the downstream compiler ABI patch is absent\n' >&2
     exit 1
@@ -184,7 +188,6 @@ case "$llvm_version" in
         exit 1
         ;;
 esac
-source_date_epoch=$(git -C "$source_root" show -s --format=%ct "$dxmt_commit")
 export SOURCE_DATE_EPOCH="$source_date_epoch"
 export ZERO_AR_DATE=1
 export LDFLAGS="${LDFLAGS:+$LDFLAGS }-Wl,--no-insert-timestamp"

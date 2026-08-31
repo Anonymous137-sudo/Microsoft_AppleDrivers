@@ -1,0 +1,3 @@
+# path|url|commit
+external/nvapi|https://github.com/NVIDIA/nvapi.git|d08488fcc82eef313b0464db37d2955709691e94
+include/native/directx|https://github.com/misyltoad/mingw-directx-headers|9df86f2341616ef1888ae59919feaa6d4fad693d

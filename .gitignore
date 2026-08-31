@@ -20,5 +20,6 @@ compile_commands.json
 *.trace
 *.gputrace
 
-# Locally materialized third-party source
+# Locally materialized scratch source. Reviewed dependency gitlinks live under
+# third_party/<component> and are intentionally tracked.
 third_party/materialized/

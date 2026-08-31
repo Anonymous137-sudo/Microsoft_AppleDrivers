@@ -1,0 +1,7 @@
+format=adx12-visible-source-v1
+upstream_url=https://github.com/3Shain/dxmt.git
+upstream_commit=e55ad281c60be97f8815b5848e57cfd9f967d759
+downstream_commit=cd4450687ae075cb15d42c87e7d5a3a1ab764079
+source_date_epoch=1787565087
+patchset_sha256=6f10828e9e85cc4e6f61a5d9c69068bbf529b558d564f528d04ecc2c9cc44718
+tracked_file_count=380

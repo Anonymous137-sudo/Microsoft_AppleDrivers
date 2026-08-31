@@ -59,7 +59,7 @@ dxc_commit=$(locked_commit directx-shader-compiler)
 dxil_spirv_commit=$(locked_commit dxil-spirv)
 mesa_commit=$(locked_commit mesa)
 
-dxmt_source="$dependency_root/dxmt-$(short_commit "$dxmt_commit")"
+dxmt_source=${ADX12_DXMT_SOURCE:-"$repo_root/source/dxmt-adx12"}
 dxc_source="$dependency_root/dxc-$(short_commit "$dxc_commit")"
 dxil_spirv_source="$dependency_root/dxil-spirv-$(short_commit "$dxil_spirv_commit")"
 mesa_source="$dependency_root/mesa-$(short_commit "$mesa_commit")"
@@ -70,7 +70,7 @@ mesa_prefix="$dependency_root/prefix-mesa-$(short_commit "$mesa_commit")"
 
 mkdir -p "$dependency_root"
 printf '%s\n' '[1/6] Materialize hash-pinned sources and downstream patches'
-materialize dxmt "$dxmt_source" "$dxmt_commit"
+"$script_dir/verify-visible-dxmt-source.sh" "$dxmt_source"
 materialize directx-shader-compiler "$dxc_source" "$dxc_commit"
 materialize dxil-spirv "$dxil_spirv_source" "$dxil_spirv_commit"
 materialize mesa "$mesa_source" "$mesa_commit"

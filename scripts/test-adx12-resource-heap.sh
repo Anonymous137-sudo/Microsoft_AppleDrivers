@@ -6,8 +6,11 @@ repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 commit=$(awk -F '|' '$1 == "dxmt" { print $2; exit }' "$repo_root/dependencies/upstreams.lock.tsv")
 short=$(printf '%.8s' "$commit")
 deps=${ADX12_DEPENDENCY_ROOT:-"$repo_root/.adx12-deps"}
-source=${ADX12_DXMT_SOURCE:-"$deps/dxmt-$short-adx12"}
-runtime=${ADX12_RUNTIME_ROOT:-"$deps/runtime-$short"}
+patchset=$(sed -n 's/^patchset_sha256=//p' \
+    "$repo_root/source/dxmt-adx12/ADX12_SOURCE_PROVENANCE")
+short_patchset=$(printf '%.8s' "$patchset")
+source=${ADX12_DXMT_SOURCE:-"$repo_root/source/dxmt-adx12"}
+runtime=${ADX12_RUNTIME_ROOT:-"$deps/runtime-$short-adx12-$short_patchset"}
 host=${ADX12_CROSSOVER_ROOT:-"$deps/crossover-hosts/CrossOver-26.3-adx12-managed"}
 probe="$runtime/x86_64-windows/adx12-resource-heap.exe"
 log=$(mktemp -t adx12-resource-heap)

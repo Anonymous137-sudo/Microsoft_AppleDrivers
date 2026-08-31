@@ -1,0 +1,30 @@
+[submodule "third_party/vkd3d-proton"]
+	path = third_party/vkd3d-proton
+	url = https://github.com/HansKristian-Work/vkd3d-proton.git
+[submodule "third_party/wine-vkd3d"]
+	path = third_party/wine-vkd3d
+	url = https://gitlab.winehq.org/wine/vkd3d.git
+[submodule "third_party/dxil-spirv"]
+	path = third_party/dxil-spirv
+	url = https://github.com/HansKristian-Work/dxil-spirv.git
+[submodule "third_party/mesa"]
+	path = third_party/mesa
+	url = https://gitlab.freedesktop.org/mesa/mesa.git
+[submodule "third_party/DirectX-Headers"]
+	path = third_party/DirectX-Headers
+	url = https://github.com/microsoft/DirectX-Headers.git
+[submodule "third_party/D3D12TranslationLayer"]
+	path = third_party/D3D12TranslationLayer
+	url = https://github.com/microsoft/D3D12TranslationLayer.git
+[submodule "third_party/wine"]
+	path = third_party/wine
+	url = https://gitlab.winehq.org/wine/wine.git
+[submodule "third_party/DirectXShaderCompiler"]
+	path = third_party/DirectXShaderCompiler
+	url = https://github.com/microsoft/DirectXShaderCompiler.git
+[submodule "source/dxmt-adx12/external/nvapi"]
+	path = source/dxmt-adx12/external/nvapi
+	url = https://github.com/NVIDIA/nvapi.git
+[submodule "source/dxmt-adx12/include/native/directx"]
+	path = source/dxmt-adx12/include/native/directx
+	url = https://github.com/misyltoad/mingw-directx-headers

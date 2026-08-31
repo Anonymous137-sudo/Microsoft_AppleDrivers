@@ -7,6 +7,12 @@ builds. Recursive submodules remain pinned by their owning superproject
 gitlinks; the updater initializes those exact commits and never follows a
 submodule branch independently.
 
+The same accepted revisions are exposed as browsable gitlinks under
+`third_party/`. The complete assembled DXMT downstream is committed under
+`source/dxmt-adx12/`; it is the default runtime build input. The patch queue is
+retained alongside it because a visible source tree and a reviewable upstream
+delta solve different problems.
+
 ADX12 modifications do not live as untracked edits in a dependency checkout:
 
 - `patches/<component>/*.patch` contains ordered `git format-patch` changes;
@@ -29,3 +35,7 @@ Integration modes in the manifest are policy labels:
 Apple D3DMetal is intentionally absent. It is an installed proprietary
 comparison profile governed by `D3DMETAL_SEMANTIC_GAP_PLAN.md`, not a source
 dependency that the updater may download, copy, or redistribute.
+
+Ignored `.adx12-deps/` content contains only downloaded toolchains, generated
+builds, test products, traces, and disposable materializations. No ADX12
+implementation source is authoritative only inside that directory.

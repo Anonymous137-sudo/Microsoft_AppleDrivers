@@ -57,6 +57,16 @@ verify_source()
     }
 }
 
+verify_dxmt_source()
+{
+    source_root=$1
+    if [ -e "$source_root/.git" ]; then
+        verify_source dxmt "$source_root" "$dxmt_commit"
+    else
+        "$script_dir/verify-visible-dxmt-source.sh" "$source_root" >/dev/null
+    fi
+}
+
 dxmt_commit=$(locked_commit dxmt)
 dxc_commit=$(locked_commit directx-shader-compiler)
 dxil_spirv_commit=$(locked_commit dxil-spirv)
@@ -68,19 +78,21 @@ mesa_commit=$(locked_commit mesa)
 }
 
 dependency_root=${ADX12_DEPENDENCY_ROOT:-"$repo_root/.adx12-deps"}
-dxmt_source=${ADX12_DXMT_SOURCE:-"$dependency_root/dxmt-$(short_commit "$dxmt_commit")"}
+dxmt_source=${ADX12_DXMT_SOURCE:-"$repo_root/source/dxmt-adx12"}
 dxc_source=${ADX12_DXC_SOURCE:-"$dependency_root/dxc-$(short_commit "$dxc_commit")"}
 dxil_spirv_source=${ADX12_DXIL_SPIRV_SOURCE:-"$dependency_root/dxil-spirv-$(short_commit "$dxil_spirv_commit")"}
 mesa_source=${ADX12_MESA_SOURCE:-"$dependency_root/mesa-$(short_commit "$mesa_commit")"}
 dxc=${ADX12_DXC:-"$dependency_root/build-dxc-$(short_commit "$dxc_commit")/bin/dxc"}
 dxil_spirv=${ADX12_DXIL_SPIRV:-"$dependency_root/build-dxil-spirv-$(short_commit "$dxil_spirv_commit")/dxil-spirv"}
 kosmicomp=${ADX12_KOSMICOMP:-"$dependency_root/build-mesa-$(short_commit "$mesa_commit")/src/kosmickrisp/kosmicomp"}
-runtime_root=${ADX12_RUNTIME_ROOT:-"$dependency_root/runtime-$(short_commit "$dxmt_commit")"}
+patchset=$(sed -n 's/^patchset_sha256=//p' \
+    "$repo_root/source/dxmt-adx12/ADX12_SOURCE_PROVENANCE")
+runtime_root=${ADX12_RUNTIME_ROOT:-"$dependency_root/runtime-$(short_commit "$dxmt_commit")-adx12-$(short_commit "$patchset")"}
 host_root=${ADX12_CROSSOVER_ROOT:-"$dependency_root/crossover-hosts/CrossOver-26.3-adx12-managed"}
 bottle=${ADX12_PHASE2_BOTTLE:-ADX12-Test}
 work_root=${ADX12_PHASE2_WORK_ROOT:-"$dependency_root/phase2-shader-smoke"}
 
-verify_source dxmt "$dxmt_source" "$dxmt_commit"
+verify_dxmt_source "$dxmt_source"
 verify_source directx-shader-compiler "$dxc_source" "$dxc_commit"
 verify_source dxil-spirv "$dxil_spirv_source" "$dxil_spirv_commit"
 verify_source mesa "$mesa_source" "$mesa_commit"

@@ -7,8 +7,11 @@ lock_file="$repo_root/dependencies/upstreams.lock.tsv"
 dxmt_commit=$(awk -F '|' '$1 == "dxmt" { print $2; exit }' "$lock_file")
 short_commit=$(printf '%.8s' "$dxmt_commit")
 dependency_root=${ADX12_DEPENDENCY_ROOT:-"$repo_root/.adx12-deps"}
-dxmt_source=${ADX12_DXMT_SOURCE:-"$dependency_root/dxmt-$short_commit-adx12"}
-runtime_root=${ADX12_RUNTIME_ROOT:-"$dependency_root/runtime-$short_commit"}
+patchset=$(sed -n 's/^patchset_sha256=//p' \
+    "$repo_root/source/dxmt-adx12/ADX12_SOURCE_PROVENANCE")
+short_patchset=$(printf '%.8s' "$patchset")
+dxmt_source=${ADX12_DXMT_SOURCE:-"$repo_root/source/dxmt-adx12"}
+runtime_root=${ADX12_RUNTIME_ROOT:-"$dependency_root/runtime-$short_commit-adx12-$short_patchset"}
 host_root=${ADX12_CROSSOVER_ROOT:-"$dependency_root/crossover-hosts/CrossOver-26.3-adx12-managed"}
 bottle=${ADX12_ROOT_SIGNATURE_BOTTLE:-ADX12-Test}
 probe="$runtime_root/x86_64-windows/adx12-root-signature.exe"

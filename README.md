@@ -40,8 +40,17 @@ Metal / Apple GPU
 
 ## Project
 
+- [`source/dxmt-adx12`](source/dxmt-adx12) contains the complete, directly
+  browsable assembled D3D12, DXGI, DXMT, and WineMetal source used by the
+  current checkpoint. It is not hidden behind the patch queue or an ignored
+  developer checkout. [`source/README.md`](source/README.md) records its exact
+  upstream/downstream provenance and retained licensing.
+- [`third_party`](third_party) exposes every accepted external semantic,
+  compiler, header, and ABI dependency as a pinned gitlink. The lock manifest
+  remains the reproducibility authority; the gitlinks make those exact source
+  revisions inspectable from the repository UI.
 - [`Direct3D_12(Feature_Level_12_2)`](Direct3D_12(Feature_Level_12_2)/README.md)
-  contains the ADX12 architecture and will contain the implementation.
+  contains the ADX12 architecture, public contracts, and focused probes.
 - The
   [reuse-first engineering map](Direct3D_12(Feature_Level_12_2)/ADX12_REUSE_FIRST_ENGINEERING_MAP.md)
   records the complete architecture audit, current dependency ownership, exact
@@ -108,6 +117,25 @@ Metal / Apple GPU
   tests exist.
 - Treat AVK143 and other implementations as validation/reference paths, not as
   hidden dependencies of the native Metal backend.
+- Keep implementation source and accepted dependency revisions directly
+  inspectable. Ignored directories are restricted to generated builds,
+  downloaded toolchains, caches, traces, and temporary materializations.
+
+## Source And Build
+
+The default runtime build consumes the committed visible source:
+
+```sh
+./scripts/verify-visible-dxmt-source.sh
+./scripts/build-adx12-dxmt-runtime.sh
+```
+
+An explicit clean development checkout may still be selected with
+`ADX12_DXMT_SOURCE=/path/to/dxmt`, but it must contain the accepted upstream
+ancestor and every ordered ADX12 patch. External dependency source can be
+initialized with `git submodule update --init --recursive`. Generated runtime
+artifacts and toolchains remain outside Git because they are reproducible build
+outputs, not missing implementation source.
 
 ## Independence
 
